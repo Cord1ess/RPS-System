@@ -1,4 +1,5 @@
 # Virtual environment
+.venv/
 venv/
 env/
 ENV/
@@ -7,12 +8,22 @@ ENV/
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
 
 # Cloned upstream reference repository
 dextra-roshambo-python/
 
-# Datasets & large binaries (optional: uncomment if dataset is too large for git)
-# dataset/
+# Raw recordings and generated frames (large; back them up separately)
+data/
+
+# Downloadable model assets
+models/*.task
+
+# Per-run logs
+*.log
+logs/
+
+# Legacy v2 quarantine output
 dataset_quarantine/
 
 # IDE files

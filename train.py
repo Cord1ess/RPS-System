@@ -1,298 +1,260 @@
 """
-Optimized Training Pipeline for RoshamboNet v2 on 64x64 Pseudo-Event Motion Masks.
+Trains RoshamboNet on pseudo-DVS frames produced by build_dataset.py.
 
-Key improvements:
-1. BatchNorm2d per conv block in model (resolves sparse motion mask training instability)
-2. Motion Activity Curation: Automatically filters empty/non-motion frames (<15 active pixels)
-   from gesture classes while preserving all background frames, eliminating label noise.
-3. AdamW optimizer (better weight decay handling vs Adam)
-4. CosineAnnealingLR scheduler (T_max=30) - breaks the ~0.69 loss plateau
-5. Class-weighted CrossEntropyLoss (x1.2 for scissors, 1.0 for rock/paper/background)
-6. RandomRotation(15) + RandomAffine augmentations for robust spatial invariance
-7. 30 epochs for full convergence with cosine schedule
-8. Best model checkpoint saved by validation accuracy (achieves 93%+ val acc)
+Key differences from the v2 trainer (legacy/train_v2.py):
+1. Split by PERSON, never by frame. Consecutive frames of one burst are near-duplicates, so a
+   per-frame split leaks and inflates accuracy. --val_person holds one person out; --lopo runs
+   leave-one-person-out and reports mean +/- std; --all trains on everyone for the final model.
+2. Inputs are graded constant-event-count DVS frames (Dextra normalization), not binary masks.
+3. Augmentations act on event frames: left/right flip (other hand), small rotation/translation/
+   scale, event dropout, injected noise events. Frame-skip and multi-N variants come from
+   build_dataset.py.
+4. Class weights from class frequencies; model selection by balanced accuracy.
+5. The checkpoint stores the DVS emulator parameters so the runtime can warn on mismatch.
+
+Usage:
+    python train.py --val_person alice
+    python train.py --lopo
+    python train.py --all --epochs 30
 """
 
-import os
-import glob
-import time
 import argparse
-import cv2
-import numpy as np
+import glob
+import json
+import os
+import time
+from collections import Counter
+from typing import Dict, List, Tuple
+
 import matplotlib
 matplotlib.use("Agg")  # headless-safe backend
 import matplotlib.pyplot as plt
-from sklearn.metrics import classification_report, confusion_matrix
-from PIL import Image
-
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler
-from torchvision import transforms
+import torch.nn.functional as F
+from sklearn.metrics import classification_report, confusion_matrix
 
-from model import RoshamboNet, CLASS_NAMES
-
-
-class MotionMaskDataset(Dataset):
-    """
-    Loads 64x64 motion masks with automatic motion-density curation.
-    Filters out near-empty frames (<min_gesture_pixels) mistakenly captured
-    during gesture burst transitions, preventing blank frames from polluting
-    rock/paper/scissors classes.
-    """
-    def __init__(self, root: str, transform=None, min_gesture_pixels: int = 15):
-        self.root = root
-        self.transform = transform
-        self.min_gesture_pixels = min_gesture_pixels
-        self.samples = []
-        self.classes = CLASS_NAMES
-
-        filtered_count = 0
-        for label, cname in enumerate(self.classes):
-            class_dir = os.path.join(root, cname)
-            if not os.path.exists(class_dir):
-                continue
-            files = sorted(glob.glob(os.path.join(class_dir, "*.png")) +
-                           glob.glob(os.path.join(class_dir, "*.jpg")))
-            for f in files:
-                img = cv2.imread(f, cv2.IMREAD_GRAYSCALE)
-                if img is None:
-                    continue
-                nz = int(np.count_nonzero(img))
-                # Gesture classes (0_rock, 1_paper, 2_scissors) require actual motion
-                if label < 3 and nz < min_gesture_pixels:
-                    filtered_count += 1
-                    continue
-                self.samples.append((f, label))
-
-        if len(self.samples) == 0:
-            raise ValueError(f"No valid images found in '{root}'.")
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        path, label = self.samples[idx]
-        img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            img = np.zeros((64, 64), dtype=np.uint8)
-        img_pil = Image.fromarray(img)
-        if self.transform is not None:
-            img_tensor = self.transform(img_pil)
-        else:
-            img_tensor = transforms.functional.to_tensor(img_pil)
-        return img_tensor, label
+from model import CLASS_NAMES, RoshamboNet
 
 
-def get_data_loaders(dataset_dir: str, batch_size: int = 32, val_split: float = 0.2, min_gesture_pixels: int = 15):
-    """
-    Loads 64x64 motion masks with stratified train/validation split
-    and spatial augmentations on the training set.
-    """
-    if not os.path.exists(dataset_dir):
-        raise FileNotFoundError(
-            f"Dataset directory '{dataset_dir}' not found. Run collect_data.py first."
-        )
-
-    # ---- Training augmentations ----
-    train_transform = transforms.Compose([
-        transforms.Grayscale(num_output_channels=1),
-        transforms.RandomRotation(degrees=15),
-        transforms.RandomAffine(degrees=0, translate=(0.08, 0.08), scale=(0.95, 1.05)),
-        transforms.ToTensor(),   # [0,255] -> [0.0,1.0]
-    ])
-
-    # ---- Validation: deterministic, no augmentation ----
-    val_transform = transforms.Compose([
-        transforms.Grayscale(num_output_channels=1),
-        transforms.ToTensor(),
-    ])
-
-    train_ds = MotionMaskDataset(root=dataset_dir, transform=train_transform, min_gesture_pixels=min_gesture_pixels)
-    val_ds   = MotionMaskDataset(root=dataset_dir, transform=val_transform,   min_gesture_pixels=min_gesture_pixels)
-    total    = len(train_ds)
-
-    print(f"[train] Found {total} curated samples across classes: {CLASS_NAMES}")
-
-    # Randomised 80/20 split (fixed seed for reproducibility)
-    indices = list(range(total))
-    np.random.seed(42)
-    np.random.shuffle(indices)
-    split = int(np.floor(val_split * total))
-    val_indices, train_indices = indices[:split], indices[split:]
-
-    train_loader = DataLoader(
-        train_ds, batch_size=batch_size,
-        sampler=SubsetRandomSampler(train_indices),
-        num_workers=2, pin_memory=False
-    )
-    val_loader = DataLoader(
-        val_ds, batch_size=batch_size,
-        sampler=SubsetRandomSampler(val_indices),
-        num_workers=2, pin_memory=False
-    )
-
-    print(f"[train] Train: {len(train_indices)} | Val: {len(val_indices)}")
-    return train_loader, val_loader
+def load_frames(frames_dir: str, event_counts: List[int] = None) -> Tuple[List[Dict], Dict]:
+    index_path = os.path.join(frames_dir, "index.json")
+    if not os.path.exists(index_path):
+        raise FileNotFoundError(f"{index_path} not found. Run build_dataset.py first.")
+    with open(index_path, "r", encoding="utf-8") as f:
+        index = json.load(f)
+    parts = []
+    for entry in index["files"]:
+        if event_counts and entry["event_count"] not in event_counts:
+            continue
+        data = np.load(os.path.join(frames_dir, entry["path"]))
+        if len(data["labels"]) == 0:
+            continue
+        parts.append({**entry, "x": data["frames"], "y": data["labels"].astype(np.int64)})
+    if not parts:
+        raise ValueError("No frames matched the selection.")
+    return parts, index
 
 
-def compute_class_weights(device: torch.device) -> torch.Tensor:
-    """
-    Class-weighted loss:
-    rock=1.0, paper=1.0, scissors=1.2, background=1.0
-    Gives a modest boost to scissors (thinner motion trails than fist or open palm).
-    """
-    weights = torch.tensor([1.0, 1.0, 1.2, 1.0], dtype=torch.float32).to(device)
-    print(f"[train] Class weights: rock=1.0  paper=1.0  scissors=1.2  background=1.0")
-    return weights
+def stack(parts: List[Dict]) -> Tuple[np.ndarray, np.ndarray]:
+    return np.concatenate([p["x"] for p in parts]), np.concatenate([p["y"] for p in parts])
 
 
-def train_model(args):
-    """Main training loop."""
-    device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu_only else "cpu")
-    print(f"[train] Device: {device}")
+def augment(x: torch.Tensor) -> torch.Tensor:
+    """x: (B, 1, 64, 64) in [0, 1] (counts / K)."""
+    b = x.shape[0]
+    flip = torch.rand(b) < 0.5
+    x = torch.where(flip.view(b, 1, 1, 1), x.flip(-1), x)
+    ang = (torch.rand(b) * 2 - 1) * np.deg2rad(15.0)
+    scale = 1.0 + (torch.rand(b) * 2 - 1) * 0.10
+    shift = (torch.rand(b, 2) * 2 - 1) * 0.16          # 8 % of width in [-1, 1] coordinates
+    cos, sin = torch.cos(ang) / scale, torch.sin(ang) / scale
+    theta = torch.stack([torch.stack([cos, -sin, shift[:, 0]], 1), torch.stack([sin, cos, shift[:, 1]], 1)], 1)
+    grid = F.affine_grid(theta, list(x.shape), align_corners=False)
+    x = F.grid_sample(x, grid, mode="nearest", padding_mode="zeros", align_corners=False)
+    drop_p = torch.rand(b, 1, 1, 1) * 0.2
+    x = x * (torch.rand_like(x) >= drop_p)
+    noise_p = torch.rand(b, 1, 1, 1) * 0.005
+    noise = (torch.rand_like(x) < noise_p).float() * torch.randint(1, 3, x.shape).float() / 16.0
+    return torch.clamp(x + noise, 0.0, 1.0)
 
-    train_loader, val_loader = get_data_loaders(
-        args.dataset_dir,
-        batch_size=args.batch_size,
-        val_split=args.val_split,
-        min_gesture_pixels=args.min_gesture_pixels,
-    )
 
-    # Model: RoshamboNet v2 with BatchNorm2d
-    model = RoshamboNet(num_classes=len(CLASS_NAMES), pooling="avg", dropout=0.1).to(device)
-    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"[train] RoshamboNet v2 (BatchNorm). Trainable params: {total_params:,}")
+def to_tensor(x: np.ndarray) -> torch.Tensor:
+    return torch.from_numpy(x).float().div_(255.0).unsqueeze(1)
 
-    # Loss with class weighting
-    class_weights = compute_class_weights(device)
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
 
-    # AdamW optimizer + CosineAnnealingLR scheduler
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs, eta_min=1e-5
-    )
+def predict(model: nn.Module, x: np.ndarray, batch: int = 512) -> np.ndarray:
+    model.eval()
+    preds = []
+    with torch.inference_mode():
+        for i in range(0, len(x), batch):
+            preds.append(model(to_tensor(x[i:i + batch])).argmax(1).numpy())
+    return np.concatenate(preds) if preds else np.zeros(0, np.int64)
 
-    history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
-    best_val_acc = 0.0
-    t_start = time.time()
 
-    print(f"\n================ Training ({args.epochs} Epochs) ================")
+def balanced_accuracy(y: np.ndarray, p: np.ndarray) -> float:
+    recalls = [np.mean(p[y == c] == c) for c in np.unique(y)]
+    return float(np.mean(recalls)) if recalls else 0.0
+
+
+def class_weights(y: np.ndarray) -> torch.Tensor:
+    counts = np.bincount(y, minlength=len(CLASS_NAMES)).astype(np.float64)
+    w = counts.sum() / (len(CLASS_NAMES) * np.maximum(counts, 1))
+    return torch.tensor(np.clip(w, 0.25, 4.0), dtype=torch.float32)
+
+
+def train_fold(train_x, train_y, val_x, val_y, args, tag: str):
+    torch.manual_seed(args.seed)
+    rng = np.random.default_rng(args.seed)
+    model = RoshamboNet(num_classes=len(CLASS_NAMES), pooling="avg", dropout=0.1)
+    weights = class_weights(train_y)
+    criterion = nn.CrossEntropyLoss(weight=weights)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
+    print(f"[train:{tag}] train {len(train_y)} frames {dict(sorted(Counter(train_y.tolist()).items()))} | "
+          f"val {len(val_y)} | class weights {np.round(weights.numpy(), 2).tolist()}")
+
+    history = {"train_loss": [], "train_acc": [], "val_bal_acc": []}
+    best_state, best_bal = None, -1.0
     for epoch in range(1, args.epochs + 1):
-        # ---- Train ----
         model.train()
-        run_loss, correct, total = 0.0, 0, 0
-        for imgs, labels in train_loader:
-            imgs, labels = imgs.to(device), labels.to(device)
+        order = rng.permutation(len(train_y))
+        run_loss = correct = seen = 0
+        for i in range(0, len(order), args.batch_size):
+            idx = order[i:i + args.batch_size]
+            xb, yb = augment(to_tensor(train_x[idx])), torch.from_numpy(train_y[idx])
             optimizer.zero_grad()
-            out  = model(imgs)
-            loss = criterion(out, labels)
+            out = model(xb)
+            loss = criterion(out, yb)
             loss.backward()
             optimizer.step()
-
-            run_loss += loss.item() * imgs.size(0)
-            correct  += (out.argmax(1) == labels).sum().item()
-            total    += labels.size(0)
-
+            run_loss += loss.item() * len(idx)
+            correct += (out.argmax(1) == yb).sum().item()
+            seen += len(idx)
         scheduler.step()
-        epoch_tloss = run_loss / max(total, 1)
-        epoch_tacc  = correct  / max(total, 1)
-
-        # ---- Validate ----
-        model.eval()
-        vrun_loss, vcorrect, vtotal = 0.0, 0, 0
-        with torch.no_grad():
-            for imgs, labels in val_loader:
-                imgs, labels = imgs.to(device), labels.to(device)
-                out  = model(imgs)
-                loss = criterion(out, labels)
-                vrun_loss += loss.item() * imgs.size(0)
-                vcorrect  += (out.argmax(1) == labels).sum().item()
-                vtotal    += labels.size(0)
-
-        epoch_vloss = vrun_loss / max(vtotal, 1)
-        epoch_vacc  = vcorrect  / max(vtotal, 1)
-
-        history["train_loss"].append(epoch_tloss)
-        history["val_loss"].append(epoch_vloss)
-        history["train_acc"].append(epoch_tacc)
-        history["val_acc"].append(epoch_vacc)
-
-        marker = " <-- BEST" if epoch_vacc > best_val_acc else ""
-        print(
-            f"Epoch [{epoch:02d}/{args.epochs:02d}] "
-            f"Loss: {epoch_tloss:.4f} | Acc: {epoch_tacc*100:5.2f}% || "
-            f"Val Loss: {epoch_vloss:.4f} | Val Acc: {epoch_vacc*100:5.2f}%{marker}"
-        )
-
-        if epoch_vacc > best_val_acc:
-            best_val_acc = epoch_vacc
-            torch.save(model.state_dict(), args.output_model)
-
-    duration = time.time() - t_start
-    print(f"\n[train] Completed in {duration:.1f}s")
-    print(f"[train] Best Val Accuracy: {best_val_acc*100:.2f}%")
-    print(f"[train] Weights saved to:  {os.path.abspath(args.output_model)}")
-
-    # Reload best weights for final evaluation
-    model.load_state_dict(torch.load(args.output_model, map_location=device))
-    evaluate_and_plot(model, val_loader, device, history, args.metrics_plot)
+        history["train_loss"].append(run_loss / max(seen, 1))
+        history["train_acc"].append(correct / max(seen, 1))
+        msg = f"Epoch [{epoch:02d}/{args.epochs}] loss {history['train_loss'][-1]:.4f} acc {history['train_acc'][-1] * 100:5.1f}%"
+        if val_y is not None and len(val_y):
+            bal = balanced_accuracy(val_y, predict(model, val_x))
+            history["val_bal_acc"].append(bal)
+            msg += f" || val balanced acc {bal * 100:5.1f}%"
+            if bal > best_bal:
+                best_bal, best_state = bal, {k: v.clone() for k, v in model.state_dict().items()}
+                msg += " <-- BEST"
+        print(msg)
+    if best_state is None:   # --all: keep the final epoch
+        best_state = {k: v.clone() for k, v in model.state_dict().items()}
+    model.load_state_dict(best_state)
+    return model, history, best_bal
 
 
-def evaluate_and_plot(model, val_loader, device, history, plot_path):
-    """Full classification report, confusion matrix, and metric plot."""
-    model.eval()
-    all_preds, all_targets = [], []
-    with torch.no_grad():
-        for imgs, labels in val_loader:
-            out = model(imgs.to(device))
-            all_preds.extend(out.argmax(1).cpu().numpy())
-            all_targets.extend(labels.numpy())
+def report(model, parts_val: List[Dict], plot_path: str, history: Dict):
+    x, y = stack(parts_val)
+    p = predict(model, x)
+    present = sorted(set(y.tolist()) | set(p.tolist()))
+    print("\n--- Held-out classification report (best checkpoint) ---")
+    print(classification_report(y, p, labels=present, target_names=[CLASS_NAMES[i] for i in present],
+                                zero_division=0))
+    print("Confusion matrix (rows = true, cols = predicted):")
+    print(confusion_matrix(y, p, labels=present))
+    print("\nBalanced accuracy by event count N and session type:")
+    for key in ("event_count", "type"):
+        for val in sorted({part[key] for part in parts_val}):
+            sub = [part for part in parts_val if part[key] == val]
+            xs, ys = stack(sub)
+            print(f"  {key}={val}: {balanced_accuracy(ys, predict(model, xs)) * 100:5.1f}% ({len(ys)} frames)")
 
-    print("\n--- Classification Report (Best Checkpoint) ---")
-    present = sorted(set(all_targets) | set(all_preds))
-    tnames  = [CLASS_NAMES[i] for i in present]
-    print(classification_report(all_targets, all_preds, labels=present,
-                                target_names=tnames, zero_division=0))
-    cm = confusion_matrix(all_targets, all_preds, labels=present)
-    print("Confusion Matrix:")
-    print(cm)
-
-    # Plot
     plt.figure(figsize=(10, 4))
     plt.subplot(1, 2, 1)
-    plt.plot(history["train_loss"], label="Train Loss", color="crimson")
-    plt.plot(history["val_loss"],   label="Val Loss",   color="royalblue", linestyle="--")
-    plt.title("Loss vs. Epochs"); plt.xlabel("Epoch"); plt.ylabel("Cross-Entropy Loss")
-    plt.legend(); plt.grid(True, alpha=0.3)
-
+    plt.plot(history["train_loss"], color="crimson", label="Train loss")
+    plt.title("Loss"); plt.xlabel("Epoch"); plt.grid(True, alpha=0.3); plt.legend()
     plt.subplot(1, 2, 2)
-    plt.plot(history["train_acc"], label="Train Acc", color="crimson")
-    plt.plot(history["val_acc"],   label="Val Acc",   color="royalblue", linestyle="--")
-    plt.title("Accuracy vs. Epochs"); plt.xlabel("Epoch"); plt.ylabel("Accuracy")
-    plt.legend(); plt.grid(True, alpha=0.3)
-
+    plt.plot(history["train_acc"], color="crimson", label="Train acc")
+    if history["val_bal_acc"]:
+        plt.plot(history["val_bal_acc"], color="royalblue", linestyle="--", label="Held-out person (balanced)")
+    plt.title("Accuracy"); plt.xlabel("Epoch"); plt.grid(True, alpha=0.3); plt.legend()
     plt.tight_layout()
     plt.savefig(plot_path, dpi=150)
     plt.close()
-    print(f"[train] Metric plot saved to: {os.path.abspath(plot_path)}")
+    print(f"[train] Plot saved to {os.path.abspath(plot_path)}")
+
+
+def save_checkpoint(model, path: str, index: Dict, args, persons: List[str], val_person, val_bal):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    meta = {
+        "dvs": index["dvs"],
+        "event_counts": args.event_counts_list or index["event_counts"],
+        "train_persons": persons,
+        "val_person": val_person or "",
+        "val_balanced_acc": float(val_bal) if val_bal is not None else -1.0,
+        "classes": list(CLASS_NAMES),
+        "trained": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    torch.save({"state_dict": model.state_dict(), "meta": meta}, path)
+    print(f"[train] Checkpoint saved to {os.path.abspath(path)}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Train RoshamboNet on pseudo-DVS frames")
+    parser.add_argument("--frames", default="data/frames")
+    parser.add_argument("--val_person", default=None)
+    parser.add_argument("--lopo", action="store_true", help="Leave-one-person-out evaluation")
+    parser.add_argument("--all", action="store_true", help="Train on every person (final model)")
+    parser.add_argument("--event_counts", default="", help="Restrict to these N, e.g. 1500")
+    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--output", default="models/motion_cnn_v3.pth")
+    parser.add_argument("--metrics_plot", default="models/training_metrics_v3.png")
+    args = parser.parse_args()
+    args.event_counts_list = [int(v) for v in args.event_counts.split(",") if v]
+
+    parts, index = load_frames(args.frames, args.event_counts_list)
+    persons = sorted({p["person"] for p in parts})
+    print(f"[train] {sum(len(p['y']) for p in parts)} frames from {len(persons)} people: {persons}")
+
+    if args.lopo:
+        if len(persons) < 2:
+            raise SystemExit("--lopo needs at least 2 people.")
+        scores = {}
+        for person in persons:
+            tr = [p for p in parts if p["person"] != person]
+            va = [p for p in parts if p["person"] == person]
+            (tx, ty), (vx, vy) = stack(tr), stack(va)
+            _, _, best = train_fold(tx, ty, vx, vy, args, tag=f"holdout={person}")
+            scores[person] = best
+        print("\n=========== LEAVE-ONE-PERSON-OUT ===========")
+        for person, s in scores.items():
+            print(f"  {person:12s} balanced acc {s * 100:5.1f}%")
+        vals = np.array(list(scores.values()))
+        print(f"  mean {vals.mean() * 100:5.1f}% +/- {vals.std() * 100:4.1f}%")
+        return
+
+    if args.all:
+        tx, ty = stack(parts)
+        model, history, _ = train_fold(tx, ty, None, None, args, tag="all")
+        save_checkpoint(model, args.output, index, args, persons, None, None)
+        return
+
+    val_person = args.val_person
+    if val_person is None:
+        if len(persons) < 2:
+            raise SystemExit("Only one person recorded: record more people, or pass --all "
+                             "(no honest held-out estimate is possible with one person).")
+        val_person = persons[-1]
+        print(f"[train] No --val_person given; holding out '{val_person}'.")
+    if val_person not in persons:
+        raise SystemExit(f"--val_person '{val_person}' not found; people: {persons}")
+    tr = [p for p in parts if p["person"] != val_person]
+    va = [p for p in parts if p["person"] == val_person]
+    (tx, ty), (vx, vy) = stack(tr), stack(va)
+    model, history, best = train_fold(tx, ty, vx, vy, args, tag=f"holdout={val_person}")
+    save_checkpoint(model, args.output, index, args, [p for p in persons if p != val_person], val_person, best)
+    report(model, va, args.metrics_plot, history)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Train RoshamboNet v2 on 64x64 Pseudo-Event Motion Masks"
-    )
-    parser.add_argument("--dataset_dir",         type=str,   default="dataset",              help="Dataset directory")
-    parser.add_argument("--epochs",              type=int,   default=30,                     help="Training epochs (30 recommended)")
-    parser.add_argument("--batch_size",          type=int,   default=32,                     help="Batch size")
-    parser.add_argument("--lr",                  type=float, default=1e-3,                   help="Initial learning rate for AdamW")
-    parser.add_argument("--val_split",           type=float, default=0.2,                    help="Validation split fraction")
-    parser.add_argument("--min_gesture_pixels",  type=int,   default=15,                     help="Minimum active motion pixels for gesture samples")
-    parser.add_argument("--output_model",        type=str,   default="motion_model.pth",     help="Output model weights file")
-    parser.add_argument("--metrics_plot",        type=str,   default="training_metrics.png", help="Output metric plot file")
-    parser.add_argument("--cpu_only",            action="store_true",                         help="Force CPU training")
-    args = parser.parse_args()
-
-    train_model(args)
+    main()

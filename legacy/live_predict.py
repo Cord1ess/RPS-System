@@ -17,6 +17,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root: model.py
 from model import RoshamboNet, MajorityVote, CLASS_NAMES, LABEL_TO_SYMBOL, COUNTER_MOVES
 from pseudo_event_producer import PseudoEventProducer
 

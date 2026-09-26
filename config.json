@@ -1,0 +1,103 @@
+{
+  "camera": {
+    "index": 0,
+    "backend": "msmf",
+    "width": 640,
+    "height": 480,
+    "fps": 30,
+    "fourcc": "YUY2",
+    "mirror": true,
+    "lock_exposure": false,
+    "exposure": -6.0,
+    "lock_white_balance": false,
+    "wb_temperature": 4500,
+    "restore_auto_on_exit": true
+  },
+  "roi": {
+    "x": 140,
+    "y": 60,
+    "size": 360,
+    "record_margin": 0.25
+  },
+  "dvs": {
+    "sensor_size": 128,
+    "frame_size": 64,
+    "log_offset": 8.0,
+    "contrast_threshold": 0.2,
+    "event_count": 1500,
+    "clip_count": 16,
+    "noise_filter": true,
+    "global_reset_fraction": 0.6,
+    "flush_min_fraction": 0.33,
+    "still_events_per_frame": 40,
+    "flush_still_frames": 2,
+    "max_accumulation_s": 0.5
+  },
+  "cnn": {
+    "model_path": "models/motion_cnn_v3.pth",
+    "threads": 1
+  },
+  "hand": {
+    "model_path": "models/hand_landmarker.task",
+    "enabled": true,
+    "min_detection_confidence": 0.5,
+    "min_presence_confidence": 0.5,
+    "min_tracking_confidence": 0.5,
+    "crop_margin": 0.25,
+    "extend_threshold": 0.3,
+    "curl_threshold": 0.45,
+    "frame_budget_ms": 28.0
+  },
+  "vote": {
+    "method": "sequence",
+    "k": 2,
+    "min_confidence": 0.7,
+    "max_gap_s": 0.25,
+    "majority_window": 5
+  },
+  "decision": {
+    "mode": "countdown",
+    "source": "fused",
+    "active_events_per_frame": 100,
+    "still_events_per_frame": 40,
+    "still_frames": 2,
+    "mp_stable_frames": 3,
+    "mp_min_confidence": 0.6,
+    "mp_still_events_in_hand": 25,
+    "mp_after_cnn_commit_s": 0.15,
+    "switch_dead_time_s": 0.15,
+    "idle_timeout_s": 1.0,
+    "idle_action": "ready",
+    "pumps_before_shoot": 3,
+    "pump_source": "auto",
+    "pump_min_amplitude": 0.08,
+    "pump_min_period_s": 0.18,
+    "shoot_window_s": 1.2,
+    "rock_min_shoot_s": 0.15,
+    "rock_settle_fallback_s": 0.35,
+    "hold_min_s": 1.0,
+    "hold_max_s": 4.0,
+    "correction_s": 0.0
+  },
+  "robot": {
+    "enabled": true,
+    "host": "192.168.4.1",
+    "port": 4210,
+    "heartbeat_s": 0.1,
+    "ack_timeout_s": 0.5
+  },
+  "latency": {
+    "camera_latency_ms": 50.0,
+    "servo_transition_ms": {
+      "N>R": 150.0,
+      "N>P": 150.0,
+      "N>S": 150.0,
+      "R>P": 150.0,
+      "R>S": 150.0,
+      "P>R": 150.0,
+      "P>S": 150.0,
+      "S>R": 150.0,
+      "S>P": 150.0
+    }
+  }
+}
