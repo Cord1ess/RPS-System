@@ -37,7 +37,7 @@
     "model_path": "models/dextra_roshambo.pth",
     "threads": 1,
     "rotate": 0,
-    "flip": false
+    "flip": true
   },
   "hand": {
     "model_path": "models/hand_landmarker.task",

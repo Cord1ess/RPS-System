@@ -123,3 +123,38 @@ def test_play_starts_without_any_motion_model(qapp, window, monkeypatch):
     assert play.pipeline is not None and play.cnn is None and play.hand is not None
     assert "no motion model" in play.summary.text()
     play._toggle()
+
+
+def test_reader_choices_are_explicit(qapp, window):
+    window.tabs.setCurrentIndex(5)
+    play = window.pages[5]
+    texts = [play.detector.itemText(i) for i in range(play.detector.count())]
+    assert texts == ["Motion model (Dextra)", "Hand tracker (MediaPipe)",
+                     "Both: motion model while moving, hand tracker when steady"]
+    models = [play.model.itemText(i) for i in range(play.model.count())]
+    if os.path.exists("models/dextra_roshambo.pth"):
+        assert models[0] == "Dextra, as downloaded"
+    tuned = [i for i in range(play.model.count()) if "tuned on your recordings" in play.model.itemText(i)]
+    assert tuned                                                    # listed even before one exists
+    if not os.path.exists("models/dextra_tuned.pth"):
+        assert not play.model.model().item(tuned[0]).isEnabled()    # greyed out until trained
+    select_data(play.detector, "cnn")
+    assert play.motion_card.isEnabled() and not play.tracker_card.isEnabled()
+    select_data(play.detector, "mediapipe")
+    assert not play.motion_card.isEnabled() and play.tracker_card.isEnabled() and not play.model.isEnabled()
+    select_data(play.detector, "fused")
+    assert play.motion_card.isEnabled() and play.tracker_card.isEnabled()
+
+
+def test_comparison_uses_the_chosen_motion_model(qapp, window, tmp_path):
+    if not os.path.exists("models/dextra_roshambo.pth"):
+        pytest.skip("Dextra's model not downloaded")
+    window.tabs.setCurrentIndex(4)
+    ev = window.pages[4]
+    ev.target.addItem("x", str(tmp_path))
+    ev.target.setCurrentIndex(ev.target.count() - 1)
+    select_data(ev.model_pick, "models/dextra_roshambo.pth")
+    started = []
+    ev.runner.start = lambda args: started.append(args)
+    ev._run()
+    assert "cnn.model_path=models/dextra_roshambo.pth" in started[0]

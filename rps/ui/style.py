@@ -14,6 +14,8 @@ TEXT, MUTED, ACCENT = "#e4e7eb", "#9aa3ad", "#2f6fed"
 OK, WARN, BAD, OFF = "#3fb96b", "#e0a030", "#e0524a", "#6b7280"
 GESTURE_COLOR = {"rock": "#e879b0", "paper": "#5ccf82", "scissors": "#5b9cf0", "none": "#8b949e",
                  "ready": "#8b949e"}
+# Each reader has one colour, used for its card, its delay curve and its label on the video.
+MOTION_COLOR, TRACKER_COLOR = "#a78bfa", "#2cc5c9"
 CHECK_ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "check.svg").replace("\\", "/")
 
 QSS = f"""
@@ -129,14 +131,17 @@ def set_kind(b: QPushButton, kind: str):
 class Card(QFrame):
     """Titled panel; the title's hover text explains the card. Add content to self.body."""
 
-    def __init__(self, title: str, tooltip: str = ""):
+    def __init__(self, title: str, tooltip: str = "", color: str = ""):
         super().__init__()
         self.setObjectName("card")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 10, 12, 12)
         outer.setSpacing(6)
-        head = QLabel(title)
+        self.head = head = QLabel(title)
         head.setObjectName("cardTitle")
+        if color:                                   # identifies a reader everywhere it appears
+            head.setStyleSheet(f"color:{color};")
+            self.setStyleSheet(f"QFrame#card {{ border-left: 3px solid {color}; }}")
         if tooltip:
             head.setToolTip(tooltip)
         outer.addWidget(head)

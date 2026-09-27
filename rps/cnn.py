@@ -12,8 +12,10 @@ cnn.rotate / cnn.flip orient the frame before inference, e.g. to match Dextra's 
 view (fingers pointing left) when the webcam sees fingers pointing up.
 """
 
+import glob
+import os
 import time
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -44,8 +46,11 @@ class GestureCNN:
         self.model.load_state_dict(state)
         self.model.eval()
         self.divisor = float(self.meta.get("input_divisor", 255.0))
-        self.rotate = int(rotate) % 360
-        self.flip = bool(flip)
+        # A model tuned on our recordings learned one orientation; it always uses that one.
+        fixed = self.meta.get("orientation")
+        self.fixed_orientation = fixed is not None
+        self.rotate = int(fixed["rotate"] if fixed else rotate) % 360
+        self.flip = bool(fixed["flip"] if fixed else flip)
         dummy = torch.zeros(1, 1, 64, 64)
         with torch.inference_mode():
             for _ in range(10):
@@ -76,6 +81,47 @@ class GestureCNN:
             probs = probs[self.order]
         label = int(np.argmax(probs))
         return label, float(probs[label]), probs, ms
+
+
+def describe_model(path: str) -> Dict:
+    """
+    What a motion model file is, from its stored details: kind "dextra" (as downloaded),
+    "dextra_tuned" (tuned on our recordings), "scratch" (trained from nothing) or "unusable".
+    """
+    info = {"path": path.replace("\\", "/"), "file": os.path.basename(path), "detail": ""}
+    try:
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)
+        meta = ckpt["meta"] if isinstance(ckpt, dict) and "state_dict" in ckpt else None
+    except Exception:
+        meta = None
+    if meta is None:
+        return {**info, "kind": "unusable", "name": f"Unusable file ({info['file']})"}
+    people = meta.get("train_persons") or []
+    parts = [f"{len(people)} {'person' if len(people) == 1 else 'people'}"] if people else []
+    if meta.get("trained"):
+        parts.append(str(meta["trained"])[:10])
+    if meta.get("val_person") and meta.get("val_balanced_acc", -1) >= 0:
+        parts.append(f"{meta['val_balanced_acc'] * 100:.0f}% on {meta['val_person']}")
+    info["detail"] = ", ".join(parts)
+    if meta.get("arch") == "dextra" and not meta.get("tuned_from"):
+        return {**info, "kind": "dextra", "name": "Dextra, as downloaded"}
+    if meta.get("arch") == "dextra":
+        return {**info, "kind": "dextra_tuned", "name": "Dextra, tuned on your recordings"}
+    return {**info, "kind": "scratch", "name": "Your network, trained from scratch"}
+
+
+def list_models(folder: str = "models") -> List[Dict]:
+    """Every usable motion model file: Dextra as downloaded first, then tuned (newest first), then scratch."""
+    models = [describe_model(p) for p in glob.glob(os.path.join(folder, "*.pth"))]
+    models = [m for m in models if m["kind"] != "unusable"]
+    rank = {"dextra": 0, "dextra_tuned": 1, "scratch": 2}
+    models.sort(key=lambda m: (rank[m["kind"]], -os.path.getmtime(m["path"])))
+    for kind in ("dextra_tuned", "scratch"):          # tell several files of one kind apart
+        same = [m for m in models if m["kind"] == kind]
+        if len(same) > 1:
+            for m in same:
+                m["name"] += f" ({m['file']})"
+    return models
 
 
 def orient_batch(frames: np.ndarray, rotate: int, flip: bool) -> np.ndarray:

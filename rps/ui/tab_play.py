@@ -18,16 +18,17 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxL
                                QProgressBar, QScrollArea, QVBoxLayout, QWidget)
 
 from model import CLASS_NAMES
+from rps.cnn import list_models
 from rps.decision import GESTURE_NAME
-from rps.hud import draw_hand, draw_roi
+from rps.hud import draw_hand, draw_label, draw_roi
 from rps.pipeline import Pipeline, load_models
 from rps.robot_link import ESP_RST_BROWNOUT, MockEsp, RobotLink
 from rps.timing import LatencyLog
 from rps.ui.base import Tab
 from rps.ui.common import ConfigForm, LogView, ProcessRunner, VideoView, select_data, to_pixmap
 from rps.ui.fields import CHOICES
-from rps.ui.style import (BORDER, GESTURE_COLOR, MUTED, PANEL, Card, Chip, Collapsible, button, caption, label,
-                          page_header, set_kind, static_plot, tip)
+from rps.ui.style import (BORDER, GESTURE_COLOR, MOTION_COLOR, MUTED, PANEL, TRACKER_COLOR, Card, Chip, Collapsible,
+                          button, caption, label, page_header, set_kind, static_plot, tip)
 
 CLASS_SHORT = [c.split("_", 1)[1] for c in CLASS_NAMES]
 BAR_NAMES = ["Rock", "Paper", "Scissors", "None"]
@@ -36,6 +37,9 @@ SOURCE_NAME = {"cnn": "motion model", "mp": "hand tracker"}
 DEXTRA_MODEL = "models/dextra_roshambo.pth"
 DEXTRA_SAMPLES = "models/dextra/sample_frames"
 UI_PERIOD_S, PLOT_PERIOD_S = 0.066, 0.1
+MOTION_STALE_S = 0.4                 # a motion-model answer older than this is shown as waiting
+MOTION_BGR = tuple(int(MOTION_COLOR[i:i + 2], 16) for i in (5, 3, 1))     # '#rrggbb' -> OpenCV BGR
+TRACKER_BGR = tuple(int(TRACKER_COLOR[i:i + 2], 16) for i in (5, 3, 1))
 
 
 def colorize(frame64: np.ndarray, size: int) -> np.ndarray:
@@ -44,16 +48,8 @@ def colorize(frame64: np.ndarray, size: int) -> np.ndarray:
 
 
 def model_choices():
-    """(path, name) for every motion model file in models/."""
-    out = []
-    for path in sorted(glob.glob("models/*.pth")):
-        name = os.path.basename(path)
-        path = path.replace("\\", "/")
-        if name == "dextra_roshambo.pth":
-            out.insert(0, (path, "Dextra model (pretrained)"))
-        else:
-            out.append((path, f"Your model ({name})"))
-    return out
+    """Every usable motion model file in models/, described from its stored details (rps.cnn.list_models)."""
+    return list_models("models")
 
 
 def round_status(snap, pumps_needed: int) -> str:
@@ -115,6 +111,8 @@ class PlayTab(Tab):
         self._closing = False
         self._prev_frame_t = None
         self._probs = None
+        self._model_details = {}
+        self._last_cnn = None               # (label, confidence, perf_counter) for the video label
         self.runner = ProcessRunner(self)
         self.log = LogView(500)
         self.runner.line.connect(self.log.log)
@@ -128,18 +126,24 @@ class PlayTab(Tab):
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(14, 8, 14, 8)
         bl.setSpacing(28)
-        self.m_you = Metric("You", "The gesture the system decided you showed.")
+        self.m_you = Metric("Decision", "The final answer after the game rules: the gesture you showed. The robot "
+                                        "plays against this. The two readers on the right are raw readings; they "
+                                        "can differ from this for a moment.")
+        self.m_source = Metric("Read by", "Which reader made the decision. With 'Both', the motion model decides "
+                                          "while your hand moves and the hand tracker when it is steady (or when "
+                                          "it clearly disagrees).")
         self.m_robot = Metric("Robot", "The move sent to the robot hand (the one that beats yours).")
         self.m_round = Metric("Round", "Countdown progress: pumps counted, throw, result.")
         self.m_tempo = Metric("Tempo", "Your pump speed, learned from your last pumps. The throw is expected "
                                        "one beat after the last pump.")
-        for m in (self.m_you, self.m_robot, self.m_round, self.m_tempo):
+        for m in (self.m_you, self.m_source, self.m_robot, self.m_round, self.m_tempo):
             bl.addWidget(m)
         bl.addStretch(1)
 
         self.view = VideoView(placeholder="Camera off")
-        self.view.setToolTip("Live camera. The green square is the play zone; only it is analysed. Blue dots are "
-                             "finger points from the hand tracker.")
+        self.view.setToolTip("Live camera. The green square is the play zone; only it is analysed. In the top "
+                             "corner of the square: the hand tracker's reading (cyan, with its finger points) and "
+                             "the motion model's reading (violet).")
 
         self.plot = static_plot(pg.PlotWidget())
         self.plot.setBackground(PANEL)
@@ -152,7 +156,7 @@ class PlayTab(Tab):
         self.plot.showGrid(y=True, alpha=0.15)
         self.plot.addLegend(offset=(-8, 2), labelTextSize="8pt", colCount=4)
         self.curves = {k: self.plot.plot(pen=pg.mkPen(c, width=1.6), name=k) for k, c in
-                       (("Processing", "#e0524a"), ("Motion model", "#e879b0"), ("Hand tracker", "#5b9cf0"),
+                       (("Processing", "#e0524a"), ("Motion model", MOTION_COLOR), ("Hand tracker", TRACKER_COLOR),
                         ("Camera interval", "#9aa3ad"))}
         self.series = {k: deque(maxlen=150) for k in self.curves}
         self.delay_text = caption("", "Averages over the last 100 frames.")
@@ -181,9 +185,10 @@ class PlayTab(Tab):
         g.setContentsMargins(0, 0, 0, 0)
         g.setColumnStretch(1, 1)
         g.setVerticalSpacing(5)
-        self.detector = tip(QComboBox(), "Motion model: reads movement (Dextra's method); keep the hand moving. "
-                                         "Hand tracker: reads finger positions; works when still. Both: motion "
-                                         "model while moving, tracker when still.")
+        self.detector = tip(QComboBox(), "Motion model: reads the movement image (Dextra's method); fast, needs "
+                                         "movement. Hand tracker (MediaPipe): reads finger positions; more "
+                                         "accurate, works when still. Both: motion model while moving, hand "
+                                         "tracker when steady or when it clearly disagrees.")
         for data, text in CHOICES[("decision", "source")]:
             self.detector.addItem(text, data)
         self.detector.currentIndexChanged.connect(self._update_enabled)
@@ -191,7 +196,9 @@ class PlayTab(Tab):
                                      "answers whatever it sees, continuously.")
         for data, text in CHOICES[("decision", "mode")]:
             self.mode.addItem(text, data)
-        self.model = tip(QComboBox(), "Which motion model file to use.")
+        self.model = tip(QComboBox(), "Which motion model: Dextra as downloaded, or Dextra tuned on your "
+                                      "recordings (made on the Train page).")
+        self.model.currentIndexChanged.connect(self._model_info)
         self.import_btn = button("Download Dextra model", tooltip="Downloads Dextra's pretrained weights and "
                                                                    "converts them for this app (about 1 MB).")
         self.import_btn.clicked.connect(self._import_dextra)
@@ -199,12 +206,15 @@ class PlayTab(Tab):
         mrow.setSpacing(6)
         mrow.addWidget(self.model, 1)
         mrow.addWidget(self.import_btn)
-        g.addWidget(label("Recognition", self.detector.toolTip()), 0, 0)
+        self.model_detail = caption("", "Who the selected motion model was tuned on, when, and its accuracy on a "
+                                        "person it never saw.")
+        g.addWidget(label("Reads your hand", self.detector.toolTip()), 0, 0)
         g.addWidget(self.detector, 0, 1)
-        g.addWidget(label("Game", self.mode.toolTip()), 1, 0)
-        g.addWidget(self.mode, 1, 1)
-        g.addWidget(label("Motion model", self.model.toolTip()), 2, 0)
-        g.addLayout(mrow, 2, 1)
+        g.addWidget(label("Motion model", self.model.toolTip()), 1, 0)
+        g.addLayout(mrow, 1, 1)
+        g.addWidget(self.model_detail, 2, 1)
+        g.addWidget(label("Game", self.mode.toolTip()), 3, 0)
+        g.addWidget(self.mode, 3, 1)
         self.robot_on = tip(QCheckBox("Send moves to robot"), "Send each decision to the robot hand over Wi-Fi.")
         self.robot_on.setChecked(self.state.cfg.robot.enabled)
         self.robot_on.toggled.connect(lambda on: (setattr(self.state.cfg.robot, "enabled", bool(on)),
@@ -215,7 +225,7 @@ class PlayTab(Tab):
         cb.addWidget(self.robot_on)
         cb.addWidget(self.mock_esp)
         cb.addStretch(1)
-        g.addLayout(cb, 3, 0, 1, 2)
+        g.addLayout(cb, 4, 0, 1, 2)
         run.body.addWidget(self.options)
         self.summary = caption("", "Current run settings. Stop to change them.")
         self.summary.setVisible(False)
@@ -233,9 +243,14 @@ class PlayTab(Tab):
         br.addStretch(1)
         run.body.addLayout(br)
 
-        # ---------------- Readings
-        see = Card("Readings", "Raw readings before the game rules. The robot moves only when they agree for a "
-                               "few frames.")
+        # ---------------- the two readers, each in its own colour (same colour on the video and the graph)
+        see = Card("Motion model", "Raw reading of the motion model, before the game rules. It reads the "
+                                   "movement image, so it answers only while the hand moves.", color=MOTION_COLOR)
+        self.motion_card = see
+        self.cnn_value = QLabel("-")
+        self.cnn_value.setStyleSheet(f"font-size:13pt; font-weight:600; color:{MOTION_COLOR};")
+        tip(self.cnn_value, "The motion model's latest answer and how sure it is.")
+        see.body.addWidget(self.cnn_value)
         imgs = QHBoxLayout()
         self.cnn_input = QLabel()
         self.cnn_input.setFixedSize(144, 144)
@@ -276,16 +291,21 @@ class PlayTab(Tab):
             bars.addWidget(b, i, 1)
             self.bars.append(b)
         see.body.addLayout(bars)
-        self.cnn_status = caption("Not running", "When the motion model last answered and how often.")
+        self.cnn_status = caption("Not running", "When the motion model last answered, how often, and its time per "
+                                                 "image.")
         see.body.addWidget(self.cnn_status)
-        rows = QGridLayout()
-        rows.setColumnStretch(1, 1)
-        self.mp_value = label("off", "Hand tracker reading and its confidence.")
-        self.decision_value = label("-", "The current decision and which reader made it.")
-        for r, (name, w) in enumerate((("Hand tracker", self.mp_value), ("Decision", self.decision_value))):
-            rows.addWidget(label(name, w.toolTip()), r, 0)
-            rows.addWidget(w, r, 1)
-        see.body.addLayout(rows)
+
+        tracker = Card("Hand tracker (MediaPipe)", "Raw reading of the hand tracker, before the game rules. It finds "
+                                                   "the finger joints (the cyan points on the video), so it also "
+                                                   "works when the hand is still.", color=TRACKER_COLOR)
+        self.tracker_card = tracker
+        self.mp_value = QLabel("-")
+        self.mp_value.setStyleSheet(f"font-size:13pt; font-weight:600; color:{TRACKER_COLOR};")
+        tip(self.mp_value, "The hand tracker's current reading and how sure it is.")
+        tracker.body.addWidget(self.mp_value)
+        self.mp_status = caption("Not running", "Time per camera frame, and how many matching frames a decision "
+                                                "needs.")
+        tracker.body.addWidget(self.mp_status)
 
         # ---------------- orientation + tuning, log (collapsed)
         adv = QWidget()
@@ -317,7 +337,10 @@ class PlayTab(Tab):
         pl.setContentsMargins(0, 0, 6, 0)
         pl.addWidget(run)
         pl.addWidget(see)
-        pl.addWidget(Collapsible("Orientation and tuning", adv, tooltip="Rotate the motion image and adjust "
+        pl.addWidget(tracker)
+        pl.addWidget(Collapsible("Orientation and tuning", adv, tooltip="Turn or mirror the motion image for Dextra "
+                                                                         "as downloaded (a tuned model keeps the "
+                                                                         "orientation it was tuned with), and adjust "
                                                                          "sensitivity while playing."))
         pl.addWidget(Collapsible("Log", logw, tooltip="Messages and decision counts."))
         pl.addStretch(1)
@@ -337,19 +360,39 @@ class PlayTab(Tab):
 
     # ------------------------------------------------------------------ choices
     def _update_enabled(self, *_):
-        needs_model = self.detector.currentData() in ("fused", "cnn")
-        self.model.setEnabled(needs_model and self.pipeline is None and not self._loading)
+        source = self.detector.currentData()
+        idle = self.pipeline is None and not self._loading
+        self.model.setEnabled(source in ("fused", "cnn") and idle)
+        self.model_detail.setVisible(source in ("fused", "cnn"))
+        if idle:                                   # show which readers this choice uses
+            self.motion_card.setEnabled(source in ("fused", "cnn"))
+            self.tracker_card.setEnabled(source in ("fused", "mediapipe"))
 
     def _refresh_models(self):
         current = self.model.currentData() or self.state.cfg.cnn.model_path
+        self.model.blockSignals(True)
         self.model.clear()
         choices = model_choices()
-        for path, name in choices:
-            self.model.addItem(name, path)
+        self._model_details = {}
+        for m in choices:
+            self.model.addItem(m["name"], m["path"])
+            self.model.setItemData(self.model.count() - 1, m["detail"] or m["file"], 3)   # hover (ToolTipRole)
+            self._model_details[m["path"]] = m["detail"]
+        if not any(m["kind"] == "dextra_tuned" for m in choices):
+            self.model.addItem("Dextra, tuned on your recordings: not made yet (Train page)", "")
+            self.model.model().item(self.model.count() - 1).setEnabled(False)
         if not choices:
-            self.model.addItem("No model yet", "")
+            self.model.insertItem(0, "No motion model yet: download Dextra's", "")
         select_data(self.model, current)
+        if not self.model.currentData():
+            self.model.setCurrentIndex(0)
+        self.model.blockSignals(False)
         self.import_btn.setVisible(not os.path.exists(DEXTRA_MODEL))
+        self._model_info()
+
+    def _model_info(self, *_):
+        detail = self._model_details.get(self.model.currentData() or "", "")
+        self.model_detail.setText(f"Tuned on {detail}" if detail else "")
 
     def on_activated(self):
         cfg = self.state.cfg
@@ -450,6 +493,9 @@ class PlayTab(Tab):
         for m in messages:
             self.log.log(m)
         self._show_references(refs)
+        self.motion_card.head.setText(f"Motion model: {self.model.currentText()}" if cnn is not None
+                                      else "Motion model: off")
+        self.tracker_card.head.setText("Hand tracker (MediaPipe)" if hand is not None else "Hand tracker: off")
         cfg = self.state.cfg
         if self.robot_on.isChecked():
             host = cfg.robot.host
@@ -499,9 +545,13 @@ class PlayTab(Tab):
         self.dextra_btn.setVisible(show)
         self.summary.setVisible(not show)
         if not show:
+            readers = {"mediapipe": "Hand tracker", "cnn": "Motion model", "fused": "Both readers"}
             model = self.model.currentText() if self.cnn is not None else "no motion model"
+            if self.detector.currentData() == "mediapipe":
+                model = "hand tracker only"
             robot = ("simulated robot" if self.mock else "robot") if self.link else "robot off"
-            self.summary.setText(f"{self.detector.currentText()} · {self.mode.currentText()} · {model} · {robot}")
+            self.summary.setText(f"{readers.get(self.detector.currentData(), '')} · {model} · "
+                                 f"{self.mode.currentText().split(' (')[0]} · {robot}")
 
     def _make_pipeline(self):
         return Pipeline(self.state.cfg, self.cnn, self.hand, pose_sink=self.link.send_pose if self.link else None)
@@ -530,13 +580,18 @@ class PlayTab(Tab):
         self._probs = None
         for b in self.bars:
             b.setValue(0)
+        self._last_cnn = None
         self.m_you.set("-")
+        self.m_source.set("-")
         self.m_robot.set("-")
         self.m_round.set("Stopped")
         self.m_tempo.set("-")
+        self.cnn_value.setText("-")
         self.cnn_status.setText("Not running")
-        self.mp_value.setText("off")
-        self.decision_value.setText("-")
+        self.mp_value.setText("-")
+        self.mp_status.setText("Not running")
+        self.motion_card.head.setText("Motion model")
+        self.tracker_card.head.setText("Hand tracker (MediaPipe)")
         self.chip_proc.set("Processing -", "off")
         self.chip_robot.set("Robot off", "off")
         for s in self.series.values():
@@ -562,21 +617,44 @@ class PlayTab(Tab):
         if self._rebuild:
             self._rebuild = False
             pipeline = self.pipeline = self._make_pipeline()
-        if self.cnn is not None:            # orientation edits apply live
+        if self.cnn is not None and not self.cnn.fixed_orientation:   # orientation edits apply live
             self.cnn.rotate = int(self.state.cfg.cnn.rotate) % 360
             self.cnn.flip = bool(self.state.cfg.cnn.flip)
         r = pipeline.step(frame, src.roi)
         rec = pipeline.log_record(r)
         self.latency.add(rec)
-        draw_hand(img, src.roi, r.hand)
+        now = time.perf_counter()
+        if r.cnn is not None:
+            self._last_cnn = (r.cnn[0], r.cnn[1], now)
         mp = None
         if r.hand is not None and not r.hand.skipped:
             mp = (r.hand.present, r.hand.gesture, r.hand.confidence)
+            self._last_mp = mp
+        self._draw_readers(img, src.roi, r.hand, now)
         return {"display": img, "running": True, "snap": r.snapshot, "mp": mp, "rec": rec, "interval": interval,
                 "link": self.link.stats() if self.link else None,
                 "cnn_probs": r.cnn[2] if r.cnn is not None else None,
                 "cnn_input": self.cnn.orient(r.dvs_frame.image) if (self.cnn and r.dvs_frame is not None) else None,
                 "total_ms": self.latency.mean("total_ms")}
+
+    def _draw_readers(self, img, roi, hand, now):
+        """Each reader's own answer on the video, in its colour, so the two are never confused."""
+        draw_hand(img, roi, hand, TRACKER_BGR)
+        x, y, _s = roi
+        if self.hand is None:
+            mp_text = "Hand tracker: off"
+        else:
+            present, gesture, conf = getattr(self, "_last_mp", (False, None, 0.0))
+            mp_text = (f"Hand tracker: {GESTURE_NAME.get(gesture, 'unsure').upper()} {conf:.0%}" if present
+                       else "Hand tracker: no hand")
+        if self.cnn is None:
+            cnn_text = "Motion model: off"
+        elif self._last_cnn is None or now - self._last_cnn[2] > MOTION_STALE_S:
+            cnn_text = "Motion model: waiting for movement"
+        else:
+            cnn_text = f"Motion model: {GESTURE_NAME.get(self._last_cnn[0], '?').upper()} {self._last_cnn[1]:.0%}"
+        draw_label(img, mp_text, (x + 6, y + 20), TRACKER_BGR)
+        draw_label(img, cnn_text, (x + 6, y + 42), MOTION_BGR)
 
     # ------------------------------------------------------------------ UI thread
     def on_frame(self, p):
@@ -621,6 +699,11 @@ class PlayTab(Tab):
         human = GESTURE_NAME.get(s.human) if s.human is not None else None
         robot = POSE_GESTURE.get(s.pose, "ready")
         self.m_you.set(human.upper() if human else "-", GESTURE_COLOR.get(human, MUTED))
+        if human and s.source in SOURCE_NAME:
+            self.m_source.set(SOURCE_NAME[s.source].capitalize(),
+                              MOTION_COLOR if s.source == "cnn" else TRACKER_COLOR)
+        else:
+            self.m_source.set("-")
         self.m_robot.set(robot.upper(), GESTURE_COLOR.get(robot, MUTED))
         self.m_round.set(round_status(s, self.state.cfg.decision.pumps_before_shoot), "#e4e7eb")
         self.m_tempo.set(f"{s.tempo:.2f} s/pump" if s.tempo else ("learning" if s.mode == "countdown" else "-"),
@@ -630,23 +713,35 @@ class PlayTab(Tab):
                 val = int(round(float(v) * 100))
                 if b.value() != val:
                     b.setValue(val)
+        vote = self.state.cfg.vote
         if self.cnn is None:
-            self.cnn_status.setText("Motion model off")
+            self.cnn_value.setText("Off")
+            self.cnn_status.setText("Not used by this choice")
         else:
             while self._cnn_times and now - self._cnn_times[0] > 2.0:
                 self._cnn_times.popleft()
-            self.cnn_status.setText("Waiting for movement" if self._last_cnn_t is None else
-                                    f"Updated {1000 * (now - self._last_cnn_t):.0f} ms ago · "
-                                    f"{len(self._cnn_times) / 2:.0f} answers/s")
+            if self._probs is not None and self._last_cnn_t is not None and now - self._last_cnn_t < MOTION_STALE_S:
+                k = int(np.argmax(self._probs))
+                self.cnn_value.setText(f"{BAR_NAMES[k].upper()} {float(self._probs[k]):.0%}")
+            else:
+                self.cnn_value.setText("Waiting for movement")
+            ms = self.latency.mean("cnn_ms")
+            self.cnn_status.setText(("No movement yet" if self._last_cnn_t is None else
+                                     f"{len(self._cnn_times) / 2:.0f} answers/s · last {1000 * (now - self._last_cnn_t):.0f}"
+                                     f" ms ago") + (f" · {ms:.1f} ms each" if ms else "")
+                                    + f" · decides after {vote.k} matching answers")
         mp = p.get("mp")
         if self.hand is None:
-            self.mp_value.setText("off")
-        elif mp is not None:
-            present, gesture, conf = mp
-            name = GESTURE_NAME.get(gesture, "unsure")
-            self.mp_value.setText(f"{name.capitalize()} {conf:.0%}" if present else "no hand")
-        who = SOURCE_NAME.get(s.source, "")
-        self.decision_value.setText(f"{human.capitalize()} ({who})" if human and who else "-")
+            self.mp_value.setText("Off")
+            self.mp_status.setText("Not used by this choice")
+        else:
+            if mp is not None:
+                present, gesture, conf = mp
+                name = GESTURE_NAME.get(gesture, "unsure")
+                self.mp_value.setText(f"{name.upper()} {conf:.0%}" if present else "No hand")
+            ms = self.latency.mean("mp_ms")
+            self.mp_status.setText((f"{ms:.0f} ms per camera frame · " if ms else "")
+                                   + f"decides after {self.state.cfg.decision.mp_stable_frames} matching frames")
         self.counts.setText(f"Decisions {s.commits} · changes {s.switches}")
 
         ms = p.get("total_ms") or 0.0

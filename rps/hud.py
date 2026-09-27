@@ -28,16 +28,23 @@ def draw_roi(img: np.ndarray, roi: Roi, color=(0, 220, 0)):
     cv2.rectangle(img, (x, y), (x + s, y + s), color, 2)
 
 
-def draw_hand(img: np.ndarray, roi: Roi, hand: Optional[HandObs]):
+def draw_hand(img: np.ndarray, roi: Roi, hand: Optional[HandObs], color=(255, 200, 0)):
     if hand is None or not hand.present or hand.landmarks is None:
         return
     x, y, s = roi
     for lx, ly in hand.landmarks:
-        cv2.circle(img, (int(x + lx * s), int(y + ly * s)), 3, (255, 200, 0), -1)
+        cv2.circle(img, (int(x + lx * s), int(y + ly * s)), 3, color, -1)
     if hand.box is not None:
         x0, y0, x1, y1 = hand.box
-        cv2.rectangle(img, (int(x + x0 * s), int(y + y0 * s)), (int(x + x1 * s), int(y + y1 * s)),
-                      (255, 200, 0), 1)
+        cv2.rectangle(img, (int(x + x0 * s), int(y + y0 * s)), (int(x + x1 * s), int(y + y1 * s)), color, 1)
+
+
+def draw_label(img: np.ndarray, text: str, org, color, scale: float = 0.5):
+    """Text on a dark box, readable over any background."""
+    (w, h), base = cv2.getTextSize(text, FONT, scale, 1)
+    x, y = org
+    cv2.rectangle(img, (x - 3, y - h - 4), (x + w + 3, y + base + 2), (20, 20, 20), -1)
+    cv2.putText(img, text, (x, y), FONT, scale, color, 1, cv2.LINE_AA)
 
 
 def draw_dvs_preview(img: np.ndarray, dvs_frame, label: str = "pseudo-DVS"):

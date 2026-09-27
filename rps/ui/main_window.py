@@ -16,7 +16,7 @@ TAB_TIPS = {
     "1  Setup": "Camera, light, play zone and robot connection. Do this first.",
     "2  Record": "Record labelled gesture sessions.",
     "3  Dataset": "Turn recordings into training images and check them.",
-    "4  Train": "Train the motion model on your recordings.",
+    "4  Train": "Tune Dextra's motion model on your recordings (or train a new one).",
     "5  Evaluate": "Measure how well Dextra's model and each recognition method work.",
     "6  Play": "Play against the robot hand.",
     "Settings": "Every setting. Hover a setting for what it does.",

@@ -54,7 +54,8 @@ FIELD_INFO = {
     ("dvs", "max_accumulation_s"): ("Max collection time (s)", "A motion image still not full after this long is "
                                     "sent early, or dropped if it holds too little movement.", True),
     # motion model
-    ("cnn", "model_path"): ("Model file", "The motion model file (.pth).", False),
+    ("cnn", "model_path"): ("Model file", "The motion model file: models/dextra_roshambo.pth is Dextra as "
+                            "downloaded; models/dextra_tuned.pth is Dextra tuned on your recordings.", False),
     ("cnn", "threads"): ("CPU threads", "1 is fastest for this small model.", True),
     ("cnn", "rotate"): ("Rotate motion image", "Turn the motion image to match the camera angle the model was "
                         "trained on. Dextra's camera saw the hand from the side, fingers pointing left.", False),
@@ -81,7 +82,7 @@ FIELD_INFO = {
     # game
     ("decision", "mode"): ("Game mode", "Countdown: pump 3 times, then throw. Live: the robot answers "
                            "continuously.", False),
-    ("decision", "source"): ("Recognition", "What reads your hand.", False),
+    ("decision", "source"): ("Reads your hand", "Motion model (Dextra), hand tracker (MediaPipe), or both.", False),
     ("decision", "active_events_per_frame"): ("Moving above", "Movement per camera frame that counts as the hand "
                                               "moving.", True),
     ("decision", "still_events_per_frame"): ("Still below", "Movement per camera frame that counts as still.", True),
@@ -136,8 +137,8 @@ CHOICES = {
     ("vote", "method"): [("sequence", "Same answer in a row"), ("majority", "Majority of recent answers")],
     ("decision", "mode"): [("countdown", "Countdown (3 pumps, then throw)"),
                            ("continuous", "Live (answers continuously)")],
-    ("decision", "source"): [("fused", "Motion model + hand tracker"), ("cnn", "Motion model"),
-                             ("mediapipe", "Hand tracker")],
+    ("decision", "source"): [("cnn", "Motion model (Dextra)"), ("mediapipe", "Hand tracker (MediaPipe)"),
+                             ("fused", "Both: motion model while moving, hand tracker when steady")],
     ("decision", "idle_action"): [("ready", "Return to ready"), ("hold", "Keep last move")],
     ("decision", "pump_source"): [("flow", "Movement in play zone"), ("mp", "Tracked wrist")],
     ("cnn", "rotate"): [(0, "0°"), (90, "90°"), (180, "180°"), (270, "270°")],

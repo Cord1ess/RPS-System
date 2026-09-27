@@ -35,7 +35,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.metrics import classification_report, confusion_matrix
 
-from model import CLASS_NAMES, RoshamboNet
+from model import CLASS_NAMES, DEXTRA_CLASS_ORDER, DEXTRA_TO_OURS, DextraRoshamboNet, RoshamboNet
+from rps.cnn import orient_batch
+from rps.config import load_config
 
 
 def load_frames(frames_dir: str, event_counts: List[int] = None) -> Tuple[List[Dict], Dict]:
@@ -80,8 +82,8 @@ def augment(x: torch.Tensor) -> torch.Tensor:
     return torch.clamp(x + noise, 0.0, 1.0)
 
 
-def to_tensor(x: np.ndarray) -> torch.Tensor:
-    return torch.from_numpy(x).float().div_(255.0).unsqueeze(1)
+def to_tensor(x: np.ndarray, divisor: float = 255.0) -> torch.Tensor:
+    return torch.from_numpy(x).float().div_(divisor).unsqueeze(1)
 
 
 def predict(model: nn.Module, x: np.ndarray, batch: int = 512) -> np.ndarray:
@@ -89,8 +91,34 @@ def predict(model: nn.Module, x: np.ndarray, batch: int = 512) -> np.ndarray:
     preds = []
     with torch.inference_mode():
         for i in range(0, len(x), batch):
-            preds.append(model(to_tensor(x[i:i + batch])).argmax(1).numpy())
+            preds.append(model(to_tensor(x[i:i + batch], model.divisor)).argmax(1).numpy())
     return np.concatenate(preds) if preds else np.zeros(0, np.int64)
+
+
+class DextraInOurOrder(nn.Module):
+    """Dextra's network with its outputs (paper, scissors, rock, background) reordered to ours."""
+
+    def __init__(self, net: DextraRoshamboNet):
+        super().__init__()
+        self.net = net
+        self.register_buffer("order", torch.tensor(DEXTRA_TO_OURS))
+
+    def forward(self, x):
+        return self.net(x)[:, self.order]
+
+
+def new_model(args) -> nn.Module:
+    """A fresh network, or Dextra's pretrained one to be tuned. `divisor` scales pixel values like the runtime."""
+    if args.start_from == "dextra":
+        ckpt = torch.load(args.dextra_model, map_location="cpu", weights_only=True)
+        net = DextraRoshamboNet()
+        net.load_state_dict(ckpt["state_dict"])
+        model = DextraInOurOrder(net)
+        model.divisor = float(ckpt["meta"].get("input_divisor", 256.0))
+    else:
+        model = RoshamboNet(num_classes=len(CLASS_NAMES), pooling="avg", dropout=0.1)
+        model.divisor = 255.0
+    return model
 
 
 def balanced_accuracy(y: np.ndarray, p: np.ndarray) -> float:
@@ -107,10 +135,17 @@ def class_weights(y: np.ndarray) -> torch.Tensor:
 def train_fold(train_x, train_y, val_x, val_y, args, tag: str):
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
-    model = RoshamboNet(num_classes=len(CLASS_NAMES), pooling="avg", dropout=0.1)
+    model = new_model(args)
+    if args.start_from == "dextra":
+        # With a few people's recordings, adapting only the last layers generalizes best (measured:
+        # held-out scissors 91% vs 82% when every layer is tuned); the first layers keep Dextra's edge filters.
+        for conv in model.net.convs[:args.freeze_convs]:
+            for p in conv.parameters():
+                p.requires_grad = False
     weights = class_weights(train_y)
     criterion = nn.CrossEntropyLoss(weight=weights)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr,
+                                  weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
     print(f"[train:{tag}] train {len(train_y)} frames {dict(sorted(Counter(train_y.tolist()).items()))} | "
           f"val {len(val_y) if val_y is not None else 0} | class weights {np.round(weights.numpy(), 2).tolist()}")
@@ -130,7 +165,7 @@ def train_fold(train_x, train_y, val_x, val_y, args, tag: str):
         run_loss = correct = seen = 0
         for i in range(0, len(order), args.batch_size):
             idx = order[i:i + args.batch_size]
-            xb, yb = augment(to_tensor(train_x[idx])), torch.from_numpy(train_y[idx])
+            xb, yb = augment(to_tensor(train_x[idx], model.divisor)), torch.from_numpy(train_y[idx])
             optimizer.zero_grad()
             out = model(xb)
             loss = criterion(out, yb)
@@ -184,8 +219,16 @@ def report(model, parts_val: List[Dict], plot_path: str, history: Dict):
 
 def save_checkpoint(model, path: str, index: Dict, args, persons: List[str], val_person, val_bal):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    if args.start_from == "dextra":
+        state = model.net.state_dict()          # Dextra's own output order; the runtime reorders it
+        arch = {"arch": "dextra", "class_order": DEXTRA_CLASS_ORDER, "tuned_from": "Dextra (ROSHAMBO17)"}
+    else:
+        state, arch = model.state_dict(), {"arch": "roshambo"}
     meta = {
-        "arch": "roshambo",
+        **arch,
+        "input_divisor": model.divisor,
+        # the images were turned this way in training; the runtime always applies exactly this
+        "orientation": {"rotate": args.rotate, "flip": args.flip},
         "dvs": index["dvs"],
         "event_counts": args.event_counts_list or index["event_counts"],
         "train_persons": persons,
@@ -194,7 +237,7 @@ def save_checkpoint(model, path: str, index: Dict, args, persons: List[str], val
         "classes": list(CLASS_NAMES),
         "trained": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
-    torch.save({"state_dict": model.state_dict(), "meta": meta}, path)
+    torch.save({"state_dict": state, "meta": meta}, path)
     print(f"[train] Checkpoint saved to {os.path.abspath(path)}")
 
 
@@ -205,16 +248,39 @@ def main():
     parser.add_argument("--lopo", action="store_true", help="Leave-one-person-out evaluation")
     parser.add_argument("--all", action="store_true", help="Train on every person (final model)")
     parser.add_argument("--event_counts", default="", help="Restrict to these N, e.g. 1500")
-    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--start_from", choices=["dextra", "scratch"], default="dextra",
+                        help="dextra: tune Dextra's pretrained model on your recordings; scratch: a new network")
+    parser.add_argument("--dextra_model", default="models/dextra_roshambo.pth")
+    parser.add_argument("--freeze_convs", type=int, default=3,
+                        help="When tuning Dextra: keep this many of its 5 convolution layers unchanged")
+    parser.add_argument("--config", default="config.json", help="Orientation (cnn.rotate/flip) for tuning Dextra")
+    parser.add_argument("--epochs", type=int, default=None, help="Default: 10 when tuning Dextra, 30 from scratch")
     parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=None, help="Default: 3e-4 when tuning Dextra, 1e-3 from scratch")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output", default="models/motion_cnn_v3.pth")
-    parser.add_argument("--metrics_plot", default="models/training_metrics_v3.png")
+    parser.add_argument("--output", default=None,
+                        help="Default: models/dextra_tuned.pth or models/motion_cnn_v3.pth")
+    parser.add_argument("--metrics_plot", default=None)
     args = parser.parse_args()
     args.event_counts_list = [int(v) for v in args.event_counts.split(",") if v]
+    dextra = args.start_from == "dextra"
+    args.epochs = args.epochs or (10 if dextra else 30)
+    args.lr = args.lr or (3e-4 if dextra else 1e-3)
+    args.output = args.output or ("models/dextra_tuned.pth" if dextra else "models/motion_cnn_v3.pth")
+    args.metrics_plot = args.metrics_plot or os.path.splitext(args.output)[0] + "_metrics.png"
+    if dextra:
+        if not os.path.exists(args.dextra_model):
+            raise SystemExit(f"{args.dextra_model} not found: download Dextra's model first (Play page or "
+                             f"tools/import_dextra.py), or use --start_from scratch.")
+        cfg = load_config(args.config)
+        args.rotate, args.flip = int(cfg.cnn.rotate), bool(cfg.cnn.flip)   # keep the view Dextra knows
+        print(f"[train] Tuning Dextra's model; images turned {args.rotate} degrees, mirrored {args.flip}")
+    else:
+        args.rotate, args.flip = 0, False
 
     parts, index = load_frames(args.frames, args.event_counts_list)
+    for p in parts:
+        p["x"] = orient_batch(p["x"], args.rotate, args.flip)
     persons = sorted({p["person"] for p in parts})
     print(f"[train] {sum(len(p['y']) for p in parts)} frames from {len(persons)} people: {persons}")
 

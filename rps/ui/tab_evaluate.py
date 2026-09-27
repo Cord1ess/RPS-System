@@ -7,9 +7,10 @@ import re
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                                QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
+from rps.cnn import list_models
 from rps.recorder import list_recordings
 from rps.ui.base import Tab
-from rps.ui.common import LogView, ProcessRunner
+from rps.ui.common import LogView, ProcessRunner, select_data
 from rps.ui.style import BAD, OK, WARN, Card, Collapsible, button, caption, label, page_header, row, tip
 
 COLUMNS = [("setting", "Setting", "str", "Only for comparisons: the value being compared."),
@@ -75,8 +76,13 @@ class EvaluateTab(Tab):
             self.src[data] = cb
             boxes.append(cb)
         compare.body.addLayout(row(*boxes))
-        self.model_label = caption("", "Motion model file used for 'Motion model' and 'Both'.")
-        compare.body.addWidget(self.model_label)
+        self.model_pick = tip(QComboBox(), "Which motion model 'Motion model' and 'Both' use: Dextra as "
+                                           "downloaded, or Dextra tuned on your recordings. Run once with each to "
+                                           "compare them.")
+        mr = QHBoxLayout()
+        mr.addWidget(label("Motion model", self.model_pick.toolTip()))
+        mr.addWidget(self.model_pick, 1)
+        compare.body.addLayout(mr)
         adv = QWidget()
         ag = QGridLayout(adv)
         ag.setContentsMargins(0, 0, 0, 0)
@@ -139,9 +145,13 @@ class EvaluateTab(Tab):
         idx = self.target.findData(current)
         if idx >= 0:
             self.target.setCurrentIndex(idx)
-        path = self.state.cfg.cnn.model_path
-        self.model_label.setText(f"Motion model: {os.path.basename(path)}" if os.path.exists(path) else
-                                 "No motion model file: 'Motion model' and 'Both' are skipped")
+        current_model = self.model_pick.currentData() or self.state.cfg.cnn.model_path
+        self.model_pick.clear()
+        for m in list_models("models"):
+            self.model_pick.addItem(m["name"], m["path"])
+        if self.model_pick.count() == 0:
+            self.model_pick.addItem("None yet: 'Motion model' and 'Both' are skipped", "")
+        select_data(self.model_pick, current_model)
         if not people:
             self.verdict.setText("No recordings yet")
 
@@ -177,6 +187,8 @@ class EvaluateTab(Tab):
             return
         args = ["replay_eval.py", "--recordings", self.target.currentData(), "--config", self.state.run_config(),
                 "--sources", ",".join(sources)]
+        if self.model_pick.currentData():
+            args += ["--set", f"cnn.model_path={self.model_pick.currentData()}"]
         for item in re.split(r"[;\n]+", self.overrides.text()):
             if item.strip():
                 args += ["--set", item.strip()]

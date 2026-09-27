@@ -30,7 +30,18 @@ class TrainTab(Tab):
         self.runner.finished.connect(self._done)
 
         what = Card("Training", "Train the motion model on the training images from the Dataset page. Not needed "
-                                "to use Dextra's model.")
+                                "to use Dextra's model as downloaded.")
+        self.start_from = tip(QComboBox(), "Dextra's model: keep what it learned from about 20 people and adapt "
+                                           "its last layers to this webcam (recommended: on one person's recordings "
+                                           "this lifted scissors from 65% to 91%). Nothing: a new network; needs "
+                                           "far more recordings.")
+        self.start_from.addItem("Dextra's model: tune it on your recordings", "dextra")
+        self.start_from.addItem("Nothing: train a new network from scratch", "scratch")
+        self.start_from.currentIndexChanged.connect(self._start_from_changed)
+        sf = QHBoxLayout()
+        sf.addWidget(label("Start from", self.start_from.toolTip()))
+        sf.addWidget(self.start_from, 1)
+        what.body.addLayout(sf)
         self.mode_lopo = tip(QRadioButton("Accuracy check"), "Trains once per person, each time leaving that person "
                                                              "out, and reports accuracy on them. Saves no model.")
         self.mode_hold = tip(QRadioButton("Train, test on one person"), "Trains on everyone except the chosen "
@@ -52,26 +63,27 @@ class TrainTab(Tab):
         ag = QGridLayout(adv)
         ag.setContentsMargins(0, 0, 0, 0)
         ag.setColumnStretch(1, 1)
-        self.epochs = tip(QSpinBox(), "Passes over all training images. 30 is a good default.")
+        self.epochs = tip(QSpinBox(), "Passes over all training images. Defaults: 10 when tuning Dextra, 30 from "
+                                      "scratch.")
         self.epochs.setRange(1, 500)
-        self.epochs.setValue(30)
         self.batch = tip(QSpinBox(), "Images per training step.")
         self.batch.setRange(8, 2048)
         self.batch.setValue(128)
-        self.lr = tip(QDoubleSpinBox(), "Step size of training. 0.001 is a good default.")
+        self.lr = tip(QDoubleSpinBox(), "Step size of training. Defaults: 0.0003 when tuning Dextra, 0.001 from "
+                                        "scratch.")
         self.lr.setDecimals(5)
         self.lr.setRange(1e-5, 1e-1)
         self.lr.setSingleStep(1e-4)
-        self.lr.setValue(1e-3)
         self.event_counts = tip(QLineEdit(), "Use only images built with these movement-per-image values. Empty = "
                                              "all.")
         self.event_counts.setPlaceholderText("all")
-        self.output = tip(QLineEdit("models/motion_cnn_v3.pth"), "Where the trained model is saved.")
+        self.output = tip(QLineEdit(), "Where the trained model is saved. Play lists it by what it is.")
         for i, (name, w) in enumerate((("Passes", self.epochs), ("Batch size", self.batch), ("Step size", self.lr),
                                        ("Movement per image", self.event_counts), ("Save as", self.output))):
             ag.addWidget(label(name, w.toolTip()), i, 0)
             ag.addWidget(w, i, 1)
         what.body.addWidget(Collapsible("Options", adv))
+        self._start_from_changed()
         self.start_btn = button("Train", "primary", "Start training.")
         self.start_btn.clicked.connect(self._start)
         cancel = button("Cancel", tooltip="Stop training.")
@@ -138,6 +150,12 @@ class TrainTab(Tab):
         if not people:
             self.fold_label.setText("No training images yet: build them on the Dataset page.")
 
+    def _start_from_changed(self, *_):
+        dextra = self.start_from.currentData() == "dextra"
+        self.epochs.setValue(10 if dextra else 30)
+        self.lr.setValue(3e-4 if dextra else 1e-3)
+        self.output.setText("models/dextra_tuned.pth" if dextra else "models/motion_cnn_v3.pth")
+
     def _people(self):
         path = os.path.join(self.state.frames_root, "index.json")
         if not os.path.exists(path):
@@ -153,7 +171,11 @@ class TrainTab(Tab):
     def _start(self):
         if self.runner.running():
             return
-        args = ["train.py", "--frames", self.state.frames_root, "--epochs", self.epochs.value(),
+        if self.start_from.currentData() == "dextra" and not os.path.exists("models/dextra_roshambo.pth"):
+            self.result.setText("Download Dextra's model first (Play page), or start from nothing.")
+            return
+        args = ["train.py", "--frames", self.state.frames_root, "--start_from", self.start_from.currentData(),
+                "--config", self.state.run_config(), "--epochs", self.epochs.value(),
                 "--batch_size", self.batch.value(), "--lr", self.lr.value(), "--output", self.output.text(),
                 "--metrics_plot", os.path.splitext(self.output.text())[0] + "_metrics.png"]
         if self.event_counts.text().strip():

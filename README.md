@@ -72,9 +72,9 @@ One window covers the whole workflow. Visible text is kept short and numeric; ho
 | **1 Setup** | Start the camera and check frame rate, light and overexposure; **Auto-configure**; **Set play zone** by dragging on the video; test the robot connection. Manual camera settings and camera delay tests are folded away |
 | **2 Record** | Choose person, session type and gesture, press **Record** (3-second countdown). A live motion preview confirms movement is seen; the progress list shows which of the 7 sessions this person still needs |
 | **3 Dataset** | All recordings with totals and free disk space; **Build** training images; check labels with a grid of random samples per person and gesture |
-| **4 Train** | Accuracy check (each person left out in turn), train and test on one person, or train on everyone; live accuracy curves and the expected accuracy on a new person |
+| **4 Train** | Start from **Dextra's model (tuned on your recordings, recommended)** or from nothing. Accuracy check (each person left out in turn), train and test on one person, or train on everyone; live accuracy curves and the expected accuracy on a new person |
 | **5 Evaluate** | **Dextra model check** (no training): ranks rotation, flip, movement per image and zoom, and saves your motion images next to Dextra's. **Compare recognition methods** on recordings, with a verdict |
-| **6 Play** | Top: You, Robot, Round (for example "Pump 2 of 3") and your learned Tempo (s per pump). Camera view, the **delay graph** (processing, motion model, hand tracker, camera interval) and health readouts. Right: **Run** (recognition, game, model, robot; shrinks to one line while playing) and **Readings** (motion image beside Dextra's examples, confidence bars, hand tracker, decision). Orientation, tuning and log are folded away |
+| **6 Play** | Choose what **reads your hand**: motion model (Dextra), hand tracker (MediaPipe) or both, and which **motion model**: Dextra as downloaded or Dextra tuned on your recordings. Top: the **Decision** the robot answers and which reader made it (**Read by**), Robot, Round, Tempo. Each reader has its own colour, used for its card on the right, its line in the delay graph and its label on the video: **violet = motion model**, **cyan = hand tracker** (with the finger points). The cards show each reader's raw answer; the Decision can differ from them for a moment because the game rules wait for agreement |
 | **Settings** | Every setting by section; tick "Show advanced settings" for fine-tuning. Save / Undo changes / Reset to defaults |
 
 **Countdown pumps adapt to the player.** Pumps are measured from the hand's up-and-down speed in the play zone (optical flow), so a lost hand track does not lose a pump. The app learns each player's tempo (only from the gaps between pumps of one round, never from the pause after a throw) and stroke size, and scales its thresholds to them. Once enough pumps are counted, an open hand (paper or scissors) is the throw, whichever beat it comes on, so players who throw on the 3rd or the 4th down stroke both work; rock is the stroke that stops instead of reversing. Movement in the first 0.3 s after a result is ignored and the next pump starts a new round. Checked on a real 45 s recording (tests/fixtures): all 28 throws decided once each, none during pumps.
@@ -121,7 +121,8 @@ python record_session.py --person alice --type background --duration 60
 ```powershell
 python build_dataset.py                       # N ∈ {750, 1500, 3000} × frame-skip {1, 2}; MediaPipe label cleaning
 python train.py --lopo                        # leave-one-person-out: honest accuracy estimate
-python train.py --val_person bob              # or --all for the final model -> models/motion_cnn_v3.pth
+python train.py --val_person bob              # tunes Dextra's model -> models/dextra_tuned.pth (--all: everyone)
+python train.py --start_from scratch --all    # a new network instead -> models/motion_cnn_v3.pth
 python replay_eval.py --recordings data/recordings/bob   # exact live pipeline on held-out recordings
 ```
 `replay_eval.py` compares **mediapipe / cnn / fused** on:
@@ -144,7 +145,8 @@ python play.py --source cnn --mode continuous --set cnn.flip=true --set dvs.even
 ```
 - The numpy weights are the complete model: Dextra's float exports (the SavedModel its own code runs, `roshambo.h5`, `modelroshambo.tf`) hold bit-identical values. The port scores 98.8% on ROSHAMBO17 test frames.
 - Dextra's camera sees the hand side-on with fingers pointing left. Which orientation matches ours is measured, not assumed: on the first recordings (one person, mirrored webcam) the best was **mirrored back, not turned**, with 5000 events per image (69% of single images correct vs 60% at the defaults); a 90° turn was not in the top 15.
-- Our 30 fps webcam events are blurrier than a real DVS. Whether the model transfers has to be measured with `replay_eval.py`; if it transfers only partly, fine-tune it on our recordings.
+- Why it misreads scissors on the webcam: the implementation is correct (the exact runtime code scores 98.75% on ROSHAMBO17 test images), but the images differ. A real event camera draws thin, dense outlines (9% of pixels, average level 117); the 30 fps webcam gives either thin faint ones (N=1500: 13%, level 46) or thick blobs (N=5000: 21%, level 90). That is a data gap, not a bug: tuning Dextra's last two layers on 1.5 minutes of one person's recordings raised held-out scissors from 65% to 91% (paper 57% to 84%), while a new network trained from scratch on the same images reached only 67-77% overall. Tune on several people (`train.py`, the default `--start_from dextra`) and check it on a person it never saw.
+- `cnn.flip` is on by default: the webcam view is mirrored for display, and Dextra reads the un-mirrored view better (60% to 67% of single images). A tuned model always uses the orientation it was tuned with.
 - Licensing: ROSHAMBO17 is CC BY-SA 4.0. The Dextra repository has no license file, so its weights are git-ignored here and not redistributed.
 
 ### 5. Play fused
