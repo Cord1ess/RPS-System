@@ -6,7 +6,7 @@ Checkpoints are dicts {"state_dict", "meta"}:
   and the runtime warns on mismatch (a CNN is only valid for the event statistics it saw).
 - meta["arch"] == "dextra": Dextra's pretrained Keras RoshamboNet imported by
   tools/import_dextra.py; its class order (paper, scissors, rock, background) is remapped here.
-Raw state_dicts are treated as legacy v2 binary-mask models.
+Anything else (e.g. a bare state_dict from the removed v2 system) is rejected.
 
 cnn.rotate / cnn.flip orient the frame before inference, e.g. to match Dextra's side-on camera
 view (fingers pointing left) when the webcam sees fingers pointing up.
@@ -31,11 +31,10 @@ class GestureCNN:
     def __init__(self, model_path: str, threads: int = 1, rotate: int = 0, flip: bool = False):
         torch.set_num_threads(threads)
         ckpt = torch.load(model_path, map_location="cpu", weights_only=True)
-        if isinstance(ckpt, dict) and "state_dict" in ckpt:
-            state, self.meta = ckpt["state_dict"], dict(ckpt.get("meta", {}))
-        else:
-            state, self.meta = ckpt, {"legacy_v2": True}
-        self.arch = self.meta.get("arch", "roshambo_v2")
+        if not (isinstance(ckpt, dict) and "state_dict" in ckpt):
+            raise ValueError(f"{model_path} is not a motion model made by train.py or tools/import_dextra.py")
+        state, self.meta = ckpt["state_dict"], dict(ckpt.get("meta", {}))
+        self.arch = self.meta.get("arch", "roshambo")
         if self.arch == "dextra":
             self.model = DextraRoshamboNet(num_classes=len(CLASS_NAMES))
             self.order = np.array(DEXTRA_TO_OURS)
@@ -55,8 +54,6 @@ class GestureCNN:
 
     def check_dvs(self, dvs: DvsConfig) -> List[str]:
         """Lists emulator settings that differ from what the checkpoint was trained on."""
-        if self.meta.get("legacy_v2"):
-            return ["checkpoint is a v2 binary-mask model; it was not trained on pseudo-DVS frames"]
         trained = self.meta.get("dvs", {})
         return [f"'{DVS_NAMES[k]}' is {getattr(dvs, k)}, but the motion model was trained with {trained[k]}"
                 for k in DVS_META_KEYS if k in trained and trained[k] != getattr(dvs, k)]

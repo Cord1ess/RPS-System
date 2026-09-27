@@ -6,7 +6,7 @@ A rock-paper-scissors robot hand (3D-printed, servo tendons, ESP32 over UDP) tha
 - **Fallback and still-hand authority:** **MediaPipe** hand landmarks with finger-curl rules.
 - **Game modes:** *countdown* ("rock, paper, scissors, shoot") and *continuous* (Dextra demo style), switchable live.
 
-> **Why v3?** The v2 system (now in [`legacy/`](legacy/)) ran the CNN on every webcam frame. When your hand is still, the frame difference is blank, and blank frames were never in training, so the output jumped randomly. A real DVS produces *no frames* when nothing moves, so Dextra's last decision simply holds. v3 reproduces that behaviour and adds MediaPipe for the still hand.
+> **Why v3?** The v2 system (removed; it is in the git history before this version) ran the CNN on every webcam frame. When your hand is still, the frame difference is blank, and blank frames were never in training, so the output jumped randomly. A real DVS produces *no frames* when nothing moves, so Dextra's last decision simply holds. v3 reproduces that behaviour and adds MediaPipe for the still hand.
 
 ---
 
@@ -217,15 +217,14 @@ record_session.py    raw lossless session recorder (FFV1 + timestamps + meta)
 build_dataset.py     recordings -> pseudo-DVS frames (multi-N, frame-skip, MediaPipe labels)
 train.py             RoshamboNet training, split by person (--lopo / --val_person / --all)
 replay_eval.py       offline evaluation of the exact live pipeline + go/no-go
-model.py             RoshamboNet, MajorityVote, counter-move table
+model.py             RoshamboNet, Dextra's network, MajorityVote, counter moves
 config.json          all tunables (defaults in rps/config.py)
 rps/                 camera, dvs_emulator, cnn, hand_tracker, voting, decision, pipeline,
                      robot_link, recorder, hud, timing, perf, config
 rps/ui/              desktop app: camera worker, tabs, shared widgets
-tools/               camera_probe, latency_test, mock_esp, import_dextra, dextra_transfer (set_roi: superseded)
+tools/               camera_probe, latency_test, mock_esp, import_dextra, dextra_transfer
 firmware/            ESP32 reference receiver
 tests/               pytest suite (emulator, voting, rules, decision, protocol, pipeline, Dextra import, UI)
-legacy/              v2 frame-differencing system, dataset and model (reference)
 ```
 
 ## Acknowledgements

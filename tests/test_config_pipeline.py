@@ -94,3 +94,21 @@ def test_fused_runs_on_the_hand_tracker_when_there_is_no_motion_model(tmp_path):
         assert r.cnn is None and r.hand is not None and r.snapshot is not None
     finally:
         hand.close()
+
+
+def test_an_unusable_model_file_falls_back_or_explains(tmp_path):
+    import torch
+    from model import RoshamboNet
+    bare = tmp_path / "old_v2.pth"
+    torch.save(RoshamboNet().state_dict(), bare)            # no meta: not made by train.py/import_dextra
+    cfg = Config()
+    cfg.cnn.model_path = str(bare)
+    with pytest.raises(RuntimeError, match="could not be loaded"):
+        load_models(cfg, "cnn")
+    if not os.path.exists(cfg.hand.model_path):
+        return
+    cnn, hand, messages = load_models(cfg, "fused")
+    try:
+        assert cnn is None and hand is not None and any("hand tracker only" in m for m in messages)
+    finally:
+        hand.close()

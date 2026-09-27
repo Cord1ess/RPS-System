@@ -1,7 +1,7 @@
 """
 Trains RoshamboNet on pseudo-DVS frames produced by build_dataset.py.
 
-Key differences from the v2 trainer (legacy/train_v2.py):
+Key differences from the removed v2 trainer:
 1. Split by PERSON, never by frame. Consecutive frames of one burst are near-duplicates, so a
    per-frame split leaks and inflates accuracy. --val_person holds one person out; --lopo runs
    leave-one-person-out and reports mean +/- std; --all trains on everyone for the final model.
@@ -185,6 +185,7 @@ def report(model, parts_val: List[Dict], plot_path: str, history: Dict):
 def save_checkpoint(model, path: str, index: Dict, args, persons: List[str], val_person, val_bal):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     meta = {
+        "arch": "roshambo",
         "dvs": index["dvs"],
         "event_counts": args.event_counts_list or index["event_counts"],
         "train_persons": persons,

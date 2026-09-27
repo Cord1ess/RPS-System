@@ -32,7 +32,7 @@ from rps.voting import make_voter
 
 READY = "N"
 POSE_LETTER = {"rock": "R", "paper": "P", "scissors": "S"}
-COUNTER_POSE = {g: POSE_LETTER[COUNTER_MOVES[g]["ai_symbol"]] for g in (ROCK, PAPER, SCISSORS)}
+COUNTER_POSE = {g: POSE_LETTER[COUNTER_MOVES[g]] for g in (ROCK, PAPER, SCISSORS)}
 GESTURE_NAME = {ROCK: "rock", PAPER: "paper", SCISSORS: "scissors", BACKGROUND: "background", -1: "unknown"}
 
 IDLE, ARMED, SHOOT, HOLD = "IDLE", "ARMED", "SHOOT", "HOLD"

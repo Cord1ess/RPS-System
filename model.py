@@ -24,13 +24,8 @@ CLASS_NAMES = ["0_rock", "1_paper", "2_scissors", "3_background"]
 LABEL_TO_SYMBOL = {0: "rock", 1: "paper", 2: "scissors", 3: "background"}
 SYMBOL_TO_LABEL = {v: k for k, v in LABEL_TO_SYMBOL.items()}
 
-# Invincible Counter-Move Logic
-COUNTER_MOVES = {
-    0: {"ai_label": 1, "ai_symbol": "paper",      "desc": "Paper covers Rock",       "icon": "✋"},
-    1: {"ai_label": 2, "ai_symbol": "scissors",   "desc": "Scissors cuts Paper",     "icon": "✌️"},
-    2: {"ai_label": 0, "ai_symbol": "rock",       "desc": "Rock crushes Scissors",   "icon": "✊"},
-    3: {"ai_label": 3, "ai_symbol": "background", "desc": "Waiting for gesture...",  "icon": "⏳"},
-}
+# The move that beats each human gesture (what the robot shows)
+COUNTER_MOVES = {0: "paper", 1: "scissors", 2: "rock"}
 
 
 class RoshamboNet(nn.Module):

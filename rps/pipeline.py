@@ -48,8 +48,14 @@ def load_models(cfg: Config, source_mode: str) -> Tuple[object, object, List[str
     if source_mode in ("fused", "cnn"):
         if os.path.exists(cfg.cnn.model_path):
             from rps.cnn import GestureCNN
-            cnn = GestureCNN(cfg.cnn.model_path, cfg.cnn.threads, cfg.cnn.rotate, cfg.cnn.flip)
-            messages += [f"Note: {w}" for w in cnn.check_dvs(cfg.dvs)]
+            try:
+                cnn = GestureCNN(cfg.cnn.model_path, cfg.cnn.threads, cfg.cnn.rotate, cfg.cnn.flip)
+                messages += [f"Note: {w}" for w in cnn.check_dvs(cfg.dvs)]
+            except Exception as e:   # wrong or damaged file
+                if source_mode == "cnn":
+                    raise RuntimeError(f"The motion model file {cfg.cnn.model_path} could not be loaded: {e}")
+                messages.append(f"The motion model file {cfg.cnn.model_path} could not be loaded ({e}): using "
+                                f"the hand tracker only.")
         elif source_mode == "cnn":
             raise RuntimeError(f"The motion model file {cfg.cnn.model_path} does not exist. Download Dextra's "
                                f"model on the Play page, or train one.")

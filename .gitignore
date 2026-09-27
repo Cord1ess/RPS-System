@@ -26,9 +26,6 @@ models/dextra_roshambo.pth
 *.log
 logs/
 
-# Legacy v2 quarantine output
-dataset_quarantine/
-
 # IDE files
 .vscode/
 .idea/
