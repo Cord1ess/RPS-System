@@ -77,7 +77,7 @@ One window covers the whole workflow. Visible text is kept short and numeric; ho
 | **6 Play** | Top: You, Robot, Round (for example "Pump 2 of 3") and your learned Tempo (s per pump). Camera view, the **delay graph** (processing, motion model, hand tracker, camera interval) and health readouts. Right: **Run** (recognition, game, model, robot; shrinks to one line while playing) and **Readings** (motion image beside Dextra's examples, confidence bars, hand tracker, decision). Orientation, tuning and log are folded away |
 | **Settings** | Every setting by section; tick "Show advanced settings" for fine-tuning. Save / Undo changes / Reset to defaults |
 
-**Countdown pumps adapt to the player.** Pumps are measured from the hand's up-and-down speed in the play zone (optical flow), so a lost hand track does not lose a pump. The app learns each player's tempo and stroke size and scales its thresholds to them. The throw is the stroke that stops instead of reversing; a throw that lands on the beat still counts if one pump was missed.
+**Countdown pumps adapt to the player.** Pumps are measured from the hand's up-and-down speed in the play zone (optical flow), so a lost hand track does not lose a pump. The app learns each player's tempo (only from the gaps between pumps of one round, never from the pause after a throw) and stroke size, and scales its thresholds to them. Once enough pumps are counted, an open hand (paper or scissors) is the throw, whichever beat it comes on, so players who throw on the 3rd or the 4th down stroke both work; rock is the stroke that stops instead of reversing. Movement in the first 0.3 s after a result is ignored and the next pump starts a new round. Checked on a real 45 s recording (tests/fixtures): all 28 throws decided once each, none during pumps.
 
 Heavy jobs (probe, build, train, evaluate, Dextra import) run the command-line scripts below as background processes and stream their output into the tab, so the app and the CLI always behave the same.
 
@@ -86,7 +86,7 @@ Heavy jobs (probe, build, train, evaluate, Dextra import) run the command-line s
 ### 0. Camera and play zone (do this in the real play lighting)
 1. Close OBS and anything else using the camera. Turn off Huawei PC Manager "AI camera" effects and any Windows camera effects (auto-framing or background blur change the whole image and flood the emulator).
 2. `python tools/camera_probe.py --write-config` picks the backend and exposure that give ≥ 28 fps at usable brightness.
-3. `python tools/set_roi.py`: drag a square around where your hand plays, **excluding your face and body**, like Dextra's camera framing.
+3. In the app's Setup page, **Set play zone**: drag a square around where your hand plays, **excluding your face and body**, like Dextra's camera framing.
 
 ### 1. Play right away with MediaPipe (no training needed)
 ```powershell
@@ -98,7 +98,7 @@ Keys: `q` quit · `m` switch countdown/continuous · `r` reset counters. The HUD
 1. Flash [firmware/esp32_rps_receiver/esp32_rps_receiver.ino](firmware/esp32_rps_receiver/esp32_rps_receiver.ino) (Arduino-ESP32 core + ESP32Servo) and calibrate `POSE_ANGLES`.
 2. Join the ESP's soft-AP `RPS-HAND` (password `rpsrobot123`); the ESP is at `192.168.4.1` (the default `robot.host`).
 3. `python play.py --source mediapipe`. The HUD should show `ESP: connected, rtt …`.
-4. Measure camera latency: `python tools/latency_test.py --mode led`, then put the median into `latency.camera_latency_ms`.
+4. Measure camera latency: `python tools/latency_test.py --mode led`, then put the median into `latency.camera_latency_ms` (the app's Setup page does this for you).
 5. Measure servo time between every pair of poses and fill in `latency.servo_transition_ms`. Choose the READY (`N`) pose that minimises the worst case.
 
 ### 3. Record data (Dextra's ROSHAMBO17 style: session-level labels; aim for ≥ 5 people)
@@ -126,7 +126,7 @@ python replay_eval.py --recordings data/recordings/bob   # exact live pipeline o
 ```
 `replay_eval.py` compares **mediapipe / cnn / fused** on:
 - hold accuracy and switches per minute (show sessions);
-- throw accuracy, and commit time versus when the hand comes to rest (throws);
+- throw accuracy, and commit time versus the throw (when paper/scissors first shows to the hand tracker, or when a rock throw stops moving down), the same reference for every method;
 - false commits (background);
 - projected robot-visible time = commit + camera latency + servo transition.
 
@@ -138,12 +138,12 @@ python replay_eval.py --recordings data/recordings/bob --set decision.still_fram
 
 ### Optional: Dextra's pretrained model (ROSHAMBO17, ~20 people)
 ```powershell
-python tools/import_dextra.py        # downloads Dextra's quantized weights -> models/dextra_roshambo.pth
-python play.py --source cnn --mode continuous --set cnn.model_path=models/dextra_roshambo.pth
-python play.py --source cnn --mode continuous --set cnn.model_path=models/dextra_roshambo.pth --set cnn.rotate=90
+python tools/import_dextra.py        # downloads Dextra's weights -> models/dextra_roshambo.pth
+python tools/dextra_transfer.py --recordings data/recordings/alice   # best orientation/settings for this camera
+python play.py --source cnn --mode continuous --set cnn.flip=true --set dvs.event_count=5000
 ```
-- The port was checked against the published data: ROSHAMBO17 test frames score 97–100% per class.
-- Dextra's camera sees the hand side-on with fingers pointing left. Use `cnn.rotate` / `cnn.flip` (and the ROI) to match that view.
+- The numpy weights are the complete model: Dextra's float exports (the SavedModel its own code runs, `roshambo.h5`, `modelroshambo.tf`) hold bit-identical values. The port scores 98.8% on ROSHAMBO17 test frames.
+- Dextra's camera sees the hand side-on with fingers pointing left. Which orientation matches ours is measured, not assumed: on the first recordings (one person, mirrored webcam) the best was **mirrored back, not turned**, with 5000 events per image (69% of single images correct vs 60% at the defaults); a 90° turn was not in the top 15.
 - Our 30 fps webcam events are blurrier than a real DVS. Whether the model transfers has to be measured with `replay_eval.py`; if it transfers only partly, fine-tune it on our recordings.
 - Licensing: ROSHAMBO17 is CC BY-SA 4.0. The Dextra repository has no license file, so its weights are git-ignored here and not redistributed.
 
@@ -159,7 +159,7 @@ python play.py --mode continuous
 
 | Mode | Behaviour |
 |---|---|
-| **countdown** (default) | `IDLE` → hand appears → `ARMED` (robot shows READY; pumps counted from vertical reversals) → after 3 pumps `SHOOT` → paper/scissors commit as soon as the vote agrees; **rock commits only after the final downstroke has landed and settled**, because the pumping fist is also "rock" → `HOLD` (≥ 1 s) → a new pump or the hand leaving starts the next round. |
+| **countdown** (default) | `IDLE` → hand appears → `ARMED` (robot shows READY; pumps counted from vertical reversals) → after 3 pumps `SHOOT`, or earlier on an open hand after 2 → paper/scissors commit as soon as they are seen; **rock commits only after the final downstroke has landed**, because the pumping fist is also "rock" → `HOLD`: the robot keeps its move until the next round's first pump (movement in the first 0.3 s is ignored) or until the hand leaves. |
 | **continuous** | The robot always shows the counter to the current decision and returns to READY after 1 s with no hand. Good for demos and debugging. |
 
 ## ESP32 protocol
@@ -170,14 +170,17 @@ ASCII over UDP, one message per datagram, port **4210**:
 |---|---|---|
 | PC → ESP | `P,<seq>,<pose>,<pc_ms>` | Pose the **robot** must show: `R`, `P`, `S` or `N` (READY). Sent on change and every 100 ms. |
 | PC → ESP | `L,<seq>,<0\|1>` | LED off/on (latency test) |
-| ESP → PC | `A,<seq>,<esp_ms>,<reset_reason>` | Acknowledgement; `reset_reason` 15 = brownout |
+| ESP → PC | `A,<seq>,<esp_ms>,<reset_reason>` | Acknowledgement; `reset_reason` 9 = brownout (ESP_RST_BROWNOUT) |
 
 Firmware must-dos:
 - `WiFi.setSleep(false)` — modem sleep adds 100 ms or more.
 - Servos jump straight to their target, with no easing.
 - Power the servos separately, with a bulk capacitor.
 - The ESP falls back to READY after 2 s without packets.
-- Allow Python through Windows Firewall, or acknowledgements never arrive.
+- Discard the rest of any oversized packet (`udp.flush()`), or the ESP stops receiving.
+- If acknowledgements never arrive, check that Windows Firewall allows Python on that network.
+
+The Play page stops the game (robot to READY) when you leave the page or the camera stops, and warns when the robot restarts during play (a power dip, reset reason 9).
 
 `python tools/mock_esp.py` stands in for the ESP during development.
 
@@ -219,7 +222,7 @@ config.json          all tunables (defaults in rps/config.py)
 rps/                 camera, dvs_emulator, cnn, hand_tracker, voting, decision, pipeline,
                      robot_link, recorder, hud, timing, perf, config
 rps/ui/              desktop app: camera worker, tabs, shared widgets
-tools/               camera_probe, set_roi, latency_test, mock_esp, import_dextra
+tools/               camera_probe, latency_test, mock_esp, import_dextra, dextra_transfer (set_roi: superseded)
 firmware/            ESP32 reference receiver
 tests/               pytest suite (emulator, voting, rules, decision, protocol, pipeline, Dextra import, UI)
 legacy/              v2 frame-differencing system, dataset and model (reference)

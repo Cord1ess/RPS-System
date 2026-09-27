@@ -170,6 +170,12 @@ def main():
         f"  and shrink the play zone to about {best['zoom'] * 100:.0f}% of its size around the hand (Setup tab)"
     print(f"\nTo use it live: rotate {best['rotate']}, flip {best['flip']}, dvs.event_count {best['N']}, "
           f"dvs.contrast_threshold {best['C']}{zoom_note}.")
+    # machine-readable line for the desktop app (Evaluate tab)
+    print("@@BEST " + json.dumps({"rotate": best["rotate"], "flip": best["flip"], "event_count": best["N"],
+                                  "contrast_threshold": best["C"], "zoom": best["zoom"],
+                                  "balanced": best["balanced"],
+                                  "per_gesture": {NAMES[k]: v for k, v in best["acc"].items()},
+                                  "current_balanced": current[0]["balanced"] if current else None}), flush=True)
 
     os.makedirs(args.out, exist_ok=True)
     theirs = defaultdict(list)

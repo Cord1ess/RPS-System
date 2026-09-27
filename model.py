@@ -1,9 +1,11 @@
 """
-RoshamboNet v2: Optimized PyTorch CNN for 64x64 Pseudo-Event Motion Masks.
-Key upgrade from v1: BatchNorm2d after every Conv layer to resolve internal
-covariate shift on sparse binary motion masks (~3-8% foreground occupancy).
+Motion models for 64x64 pseudo-DVS frames (rps/dvs_emulator.py) and the shared class names.
 
-Architecture (unchanged spatial progression from original dextra-roshambo-python):
+RoshamboNet: our trainable network (train.py). DextraRoshamboNet: Dextra's pretrained network
+(tools/import_dextra.py). Both keep the spatial progression of dextra-roshambo-python; ours adds
+BatchNorm after every convolution.
+
+RoshamboNet architecture:
   Input: (B, 1, 64, 64)
   Block 1: Conv(5x5, 16) -> BN -> ReLU -> AvgPool(2,2)   => (B, 16, 30, 30)
   Block 2: Conv(3x3, 32) -> BN -> ReLU -> AvgPool(2,2)   => (B, 32, 14, 14)
@@ -33,9 +35,8 @@ COUNTER_MOVES = {
 
 class RoshamboNet(nn.Module):
     """
-    Optimized 64x64 Tiny CNN for sub-3ms CPU inference on binary motion event frames.
-    v2 adds BatchNorm2d per block to stabilize training on sparse motion masks.
-    Inference latency: ~0.6ms mean CPU (100-sample benchmark).
+    Tiny 64x64 CNN (about 115k parameters) for pseudo-DVS frames; about 1-2 ms per frame on the CPU
+    (measured by play.py). BatchNorm per block stabilizes training on sparse event frames.
     """
     def __init__(self, num_classes=4, pooling="avg", dropout=0.1):
         super(RoshamboNet, self).__init__()

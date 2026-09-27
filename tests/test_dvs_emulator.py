@@ -46,9 +46,10 @@ def test_moving_blob_emits_constant_count_frames():
     assert len(emitted) >= 3
     for e in emitted:
         assert e.image.shape == (64, 64) and e.image.dtype == np.uint8
-        # Dextra normalization: counts clipped at K=16 then scaled by 255/16 -> multiples of 15
-        levels = np.unique(e.image)
-        assert set((levels.astype(int) * 16 // 255).tolist()) <= set(range(17))
+        # Dextra normalization: counts clipped at K=16 then scaled by 255/16
+        allowed = {int(k * 255.0 / 16) for k in range(17)}
+        assert set(np.unique(e.image).tolist()) <= allowed
+        assert np.array_equal(e.image, (np.minimum(e.counts, 16) * (255.0 / 16)).astype(np.uint8))
         assert e.image.max() > 0
 
 
@@ -89,3 +90,11 @@ def test_events_in_box():
     assert events_in_box(m, None) == 100
     assert events_in_box(m, (0.0, 0.0, 0.5, 0.5)) == 100
     assert events_in_box(m, (0.5, 0.5, 1.0, 1.0)) == 0
+
+
+def test_recording_crop_is_even_and_keeps_the_play_zone():
+    from rps.recorder import even_span
+    for lo, hi, keep_lo, keep_hi, limit in [(225, 640, 302, 611, 640), (0, 209, 0, 209, 640),
+                                            (431, 640, 431, 640, 640), (10, 50, 20, 40, 640)]:
+        a, b = even_span(lo, hi, keep_lo, keep_hi, limit)
+        assert (b - a) % 2 == 0 and a <= keep_lo and b >= keep_hi and 0 <= a and b <= limit

@@ -49,22 +49,23 @@ def load_models(cfg: Config, source_mode: str) -> Tuple[object, object, List[str
         if os.path.exists(cfg.cnn.model_path):
             from rps.cnn import GestureCNN
             cnn = GestureCNN(cfg.cnn.model_path, cfg.cnn.threads, cfg.cnn.rotate, cfg.cnn.flip)
-            messages += [f"WARNING: {w}" for w in cnn.check_dvs(cfg.dvs)]
+            messages += [f"Note: {w}" for w in cnn.check_dvs(cfg.dvs)]
         elif source_mode == "cnn":
-            raise RuntimeError(f"CNN model '{cfg.cnn.model_path}' not found. Train one (train.py) "
-                               f"or import Dextra's (tools/import_dextra.py).")
+            raise RuntimeError(f"The motion model file {cfg.cnn.model_path} does not exist. Download Dextra's "
+                               f"model on the Play page, or train one.")
         else:
-            messages.append(f"CNN model '{cfg.cnn.model_path}' not found -> MediaPipe only.")
+            messages.append(f"The motion model file {cfg.cnn.model_path} does not exist: using the hand "
+                            f"tracker only.")
     if source_mode in ("fused", "mediapipe") and cfg.hand.enabled:
         try:
             from rps.hand_tracker import HandTracker
             hand = HandTracker(cfg.hand)
         except Exception as e:  # MediaPipe missing or model file absent
             if source_mode == "mediapipe":
-                raise RuntimeError(f"MediaPipe unavailable: {e}")
-            messages.append(f"MediaPipe unavailable ({e}) -> CNN only.")
+                raise RuntimeError(f"The hand tracker could not start: {e}")
+            messages.append(f"The hand tracker could not start ({e}): using the motion model only.")
     if cnn is None and hand is None:
-        raise RuntimeError("Neither the CNN nor MediaPipe is available.")
+        raise RuntimeError("Neither the motion model nor the hand tracker is available.")
     return cnn, hand, messages
 
 

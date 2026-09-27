@@ -58,7 +58,7 @@ class DvsConfig:
 
 @dataclass
 class CnnConfig:
-    model_path: str = "models/motion_cnn_v3.pth"   # or models/dextra_roshambo.pth (tools/import_dextra.py)
+    model_path: str = "models/dextra_roshambo.pth"   # tools/import_dextra.py; train.py writes models/motion_cnn_v3.pth
     threads: int = 1
     rotate: int = 0                 # rotate DVS frames CCW before the CNN: 0 | 90 | 180 | 270
     flip: bool = False              # mirror DVS frames left-right before the CNN
@@ -107,9 +107,8 @@ class DecisionConfig:
     pump_min_amplitude: float = 0.06     # smallest stroke before the player's own size is learned (zone heights)
     pump_min_period_s: float = 0.15
     shoot_window_s: float = 1.2
-    rock_min_shoot_s: float = 0.15       # rock may commit on settle only after this long in SHOOT
-    rock_settle_fallback_s: float = 0.35  # ... and after the final downstroke, or this long if y was lost
-    hold_min_s: float = 1.0
+    rock_settle_fallback_s: float = 0.35  # decide rock this long into the throw if its landing was not seen
+    hold_min_s: float = 0.3              # movement right after a result is ignored; the next pump starts a round
     hold_max_s: float = 4.0
     correction_s: float = 0.0            # MediaPipe may correct a commit within this window (0 = off)
 
@@ -150,6 +149,21 @@ class Config:
         return asdict(self)
 
 
+# Fields that only accept these values (the UI shows them as drop-downs).
+ALLOWED: Dict[tuple, tuple] = {
+    ("camera", "backend"): ("msmf", "dshow", "any"),
+    ("cnn", "rotate"): (0, 90, 180, 270),
+    ("vote", "method"): ("sequence", "majority"),
+    ("decision", "mode"): ("countdown", "continuous"),
+    ("decision", "source"): ("fused", "cnn", "mediapipe"),
+    ("decision", "idle_action"): ("ready", "hold"),
+    ("decision", "pump_source"): ("flow", "mp"),
+}
+
+# Keys that older config.json files may still contain; they are skipped instead of rejected.
+REMOVED = {("decision", "rock_min_shoot_s")}
+
+
 def _coerce(current: Any, value: Any) -> Any:
     """Converts a JSON/CLI value to the type of the existing default."""
     if isinstance(current, bool):
@@ -165,17 +179,31 @@ def _coerce(current: Any, value: Any) -> Any:
     return value
 
 
-def apply_overrides(cfg: Config, overrides: Dict[str, Dict[str, Any]]) -> Config:
-    """Applies {section: {key: value}} onto cfg, rejecting unknown keys loudly."""
+def apply_overrides(cfg: Config, overrides: Dict[str, Dict[str, Any]], strict: bool = True) -> Config:
+    """
+    Applies {section: {key: value}} onto cfg. Unknown keys always raise. A value outside ALLOWED
+    raises when strict (command line), and keeps the default with a warning otherwise (config file),
+    so a hand-edited config.json cannot stop the app from starting.
+    """
     for section, values in overrides.items():
         if not hasattr(cfg, section):
             raise KeyError(f"Unknown config section '{section}'")
         sec = getattr(cfg, section)
         valid = {f.name for f in fields(sec)}
         for key, value in values.items():
+            if (section, key) in REMOVED:
+                continue
             if key not in valid:
                 raise KeyError(f"Unknown config key '{section}.{key}'")
-            setattr(sec, key, _coerce(getattr(sec, key), value))
+            value = _coerce(getattr(sec, key), value)
+            allowed = ALLOWED.get((section, key))
+            if allowed is not None and value not in allowed:
+                message = f"Invalid value {value!r} for '{section}.{key}'; allowed: {', '.join(map(str, allowed))}"
+                if strict:
+                    raise ValueError(message)
+                print(f"[config] WARNING: {message}. Using {getattr(sec, key)!r}.")
+                continue
+            setattr(sec, key, value)
     return cfg
 
 
@@ -196,7 +224,7 @@ def load_config(path: str = DEFAULT_CONFIG_PATH, set_args: List[str] = None) -> 
     cfg = Config()
     if path and os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
-            apply_overrides(cfg, json.load(f))
+            apply_overrides(cfg, json.load(f), strict=False)
     if set_args:
         apply_overrides(cfg, parse_set_args(set_args))
     return cfg

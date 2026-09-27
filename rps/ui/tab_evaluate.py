@@ -22,8 +22,9 @@ COLUMNS = [("setting", "Setting", "str", "Only for comparisons: the value being 
            ("throw_acc", "Throws correct", "pct", "Countdown throws where the decision was right."),
            ("throw_commits", "Throws decided", "str", "Throws the system decided."),
            ("throws_planned", "Throws recorded", "str", "Throws planned when recording."),
-           ("commit_vs_rest_ms", "Decided vs landed (ms)", "num", "Decision time relative to the hand stopping. "
-                                                                  "Negative = before."),
+           ("commit_vs_throw_ms", "Decided vs throw (ms)", "num", "Decision time relative to the throw: when "
+                                                                   "paper or scissors first shows, or when a rock "
+                                                                   "throw stops moving down. Negative = before."),
            ("visible_ms", "Robot visible (ms)", "num", "Decision + camera delay + servo time. Target 200 or less."),
            ("bg_false_commits_per_min", "False moves/min", "num", "Decisions made with no hand present.")]
 METHODS = [("mediapipe", "Hand tracker"), ("cnn", "Motion model"), ("fused", "Both")]
@@ -57,6 +58,12 @@ class EvaluateTab(Tab):
         dextra.body.addLayout(row(self.transfer_btn, sheets))
         self.transfer_result = caption("", "Best setting found by the last check.")
         dextra.body.addWidget(self.transfer_result)
+        self.apply_btn = button("Use this setting", tooltip="Apply the best turn, mirror, movement per image and "
+                                                            "motion sensitivity to Play. Save on Settings to keep it.")
+        self.apply_btn.clicked.connect(self._apply_best)
+        self.apply_btn.setVisible(False)
+        dextra.body.addLayout(row(self.apply_btn))
+        self._best = None
 
         compare = Card("Compare recognition methods", "Replays recordings through exactly what Play runs and "
                                                        "scores each method.")
@@ -102,6 +109,8 @@ class EvaluateTab(Tab):
         for i, c in enumerate(COLUMNS):
             self.table.horizontalHeaderItem(i).setToolTip(c[3])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        tip(self.table, "One row per method (and per value when comparing settings). Hover a column title for "
+                        "its meaning.")
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         results.body.addWidget(self.table, 1)
         self.output = Collapsible("Output", self.log, tooltip="Full output, including the complete ranking of the "
@@ -150,9 +159,10 @@ class EvaluateTab(Tab):
         if self.runner.running() or not self.target.currentData():
             return
         self.transfer_result.setText("")
+        self.apply_btn.setVisible(False)
         self._busy("transfer", "Dextra model check running")
         self.runner.start(["tools/dextra_transfer.py", "--recordings", self.target.currentData(),
-                           "--config", self.state.config_path, "--out", self._transfer_dir()])
+                           "--config", self.state.run_config(), "--out", self._transfer_dir()])
 
     def _open_sheets(self):
         path = self._transfer_dir()
@@ -165,7 +175,7 @@ class EvaluateTab(Tab):
         sources = [n for n, cb in self.src.items() if cb.isChecked()]
         if not sources:
             return
-        args = ["replay_eval.py", "--recordings", self.target.currentData(), "--config", self.state.config_path,
+        args = ["replay_eval.py", "--recordings", self.target.currentData(), "--config", self.state.run_config(),
                 "--sources", ",".join(sources)]
         for item in re.split(r"[;\n]+", self.overrides.text()):
             if item.strip():
@@ -191,13 +201,39 @@ class EvaluateTab(Tab):
                 text, color = "Use the hand tracker alone: both methods together are not better", BAD
             self.verdict.setText(text)
             self.verdict.setStyleSheet(f"font-size:11pt; font-weight:600; color:{color};")
-        if line.startswith("Best:") or line.startswith("To use it live:"):
-            self.transfer_result.setText((self.transfer_result.text() + "\n" + line).strip())
+        if line.startswith("@@BEST "):
+            self._show_best(json.loads(line[len("@@BEST "):]))
+
+    def _show_best(self, best: dict):
+        self._best = best
+        per = ", ".join(f"{g} {v * 100:.0f}%" for g, v in best["per_gesture"].items())
+        text = (f"Best: turned {best['rotate']} degrees, {'mirrored' if best['flip'] else 'not mirrored'}, "
+                f"movement per image {best['event_count']}, motion sensitivity {best['contrast_threshold']:.2f}: "
+                f"{best['balanced'] * 100:.0f}% of motion images correct ({per}).")
+        if best.get("current_balanced") is not None:
+            text += f" Current setting: {best['current_balanced'] * 100:.0f}%."
+        if best["zoom"] != 1.0:
+            text += f" Also shrink the play zone to about {best['zoom'] * 100:.0f}% around the hand on Setup."
+        self.transfer_result.setText(text)
+        self.apply_btn.setVisible(True)
+
+    def _apply_best(self):
+        b, cfg = self._best, self.state.cfg
+        if not b:
+            return
+        cfg.cnn.rotate, cfg.cnn.flip = int(b["rotate"]), bool(b["flip"])
+        cfg.dvs.event_count, cfg.dvs.contrast_threshold = int(b["event_count"]), float(b["contrast_threshold"])
+        self.state.mark_dirty()
+        self.apply_btn.setVisible(False)
+        self.transfer_result.setText(self.transfer_result.text() + " Applied; save on Settings to keep it.")
 
     def _done(self, code: int):
         self.run_btn.setEnabled(True)
         self.transfer_btn.setEnabled(True)
-        if code != 0:
+        if self.runner.cancelled:
+            self.verdict.setText("Cancelled")
+            self.verdict.setStyleSheet("font-size:11pt; font-weight:600;")
+        elif code != 0:
             self.verdict.setText("Stopped with an error: see Output")
             self.verdict.setStyleSheet(f"font-size:11pt; font-weight:600; color:{BAD};")
             self.output.toggle.setChecked(True)

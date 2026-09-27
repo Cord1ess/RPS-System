@@ -25,7 +25,7 @@ class SettingsTab(Tab):
         save = button("Save", "primary", "Write all settings to config.json.")
         save.clicked.connect(self.state.save)
         undo = button("Undo changes", tooltip="Reload the last saved settings.")
-        undo.clicked.connect(self.state.reload)
+        undo.clicked.connect(lambda: self.state.reload())
         reset = button("Reset to defaults", tooltip="Set every setting to its default. Not saved until you "
                                                           "press Save.")
         reset.clicked.connect(self._reset)

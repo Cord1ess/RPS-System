@@ -17,8 +17,8 @@
  *     join the "RPS-HAND" network on the laptop, the ESP is 192.168.4.1.
  *   - Power servos from a separate 5-6 V supply with a large capacitor (e.g. 1000 uF) and a
  *     common ground; several servos starting at once can brown out the ESP32 (watch the
- *     reset reason in the ACKs: 15 = brownout).
- *   - Windows Firewall must allow inbound UDP for Python, or ACKs never arrive.
+ *     reset reason in the ACKs: 9 = ESP_RST_BROWNOUT).
+ *   - If ACKs never arrive, check that Windows Firewall allows Python on this network.
  */
 
 #include <WiFi.h>
@@ -109,15 +109,16 @@ void loop() {
   int size = udp.parsePacket();
   while (size > 0) {
     int n = udp.read(buf, sizeof(buf) - 1);
+    udp.flush();                    // drop the rest of an oversized packet, or parsePacket() stops returning packets
     buf[n > 0 ? n : 0] = '\0';
     char type = buf[0];
     unsigned long seq = 0;
     if (type == 'P') {
       char pose = 0;
       unsigned long pcMs = 0;
-      if (sscanf(buf, "P,%lu,%c,%lu", &seq, &pose, &pcMs) == 3) {
-        int idx = poseIndex(pose);
-        if (idx >= 0 && idx != currentPose) applyPose(idx);   // servos move before the ACK
+      int idx = -1;
+      if (sscanf(buf, "P,%lu,%c,%lu", &seq, &pose, &pcMs) == 3 && (idx = poseIndex(pose)) >= 0) {
+        if (idx != currentPose) applyPose(idx);   // servos move before the ACK
         lastPacketMs = millis();
         sendAck(seq);
 #if DEBUG_SERIAL
@@ -126,7 +127,7 @@ void loop() {
       }
     } else if (type == 'L') {
       int on = 0;
-      if (sscanf(buf, "L,%lu,%d", &seq, &on) == 2) {
+      if (sscanf(buf, "L,%lu,%d", &seq, &on) == 2 && (on == 0 || on == 1)) {
         digitalWrite(LED_PIN, on ? HIGH : LOW);
         lastPacketMs = millis();
         sendAck(seq);

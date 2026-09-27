@@ -7,6 +7,11 @@ this converts them to float PyTorch weights, checks them on Dextra's own sample 
 writes models/dextra_roshambo.pth with meta {"arch": "dextra"} so rps/cnn.py remaps the class
 order (Dextra: paper, scissors, rock, background).
 
+These numpy weights are the complete model. The repository's float exports (model/ SavedModel, which
+consumer.py turns into the TFLite model Dextra runs; modelroshambo.tf; roshambo.h5) hold bit-identical
+values, because the network was trained quantization-aware. model/model_185 is an earlier training
+checkpoint (differs by <0.004, same accuracy). Checked 2026-09-27: 98.8% on 240 ROSHAMBO17 test frames.
+
 Note: the Dextra repository has no license file, so its weights are not redistributed here
 (models/dextra* is git-ignored). The ROSHAMBO17 dataset itself is CC BY-SA 4.0.
 

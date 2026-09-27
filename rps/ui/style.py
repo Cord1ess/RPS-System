@@ -192,6 +192,14 @@ class Collapsible(QWidget):
         self.content.setVisible(on)
 
 
+def static_plot(plot):
+    """A read-only graph: no drag, zoom, auto-scale button or right-click menu to disturb it."""
+    plot.setMouseEnabled(x=False, y=False)
+    plot.hideButtons()
+    plot.setMenuEnabled(False)
+    return plot
+
+
 def row(*widgets):
     """Widgets side by side, left-aligned (buttons keep their natural width)."""
     from PySide6.QtWidgets import QHBoxLayout

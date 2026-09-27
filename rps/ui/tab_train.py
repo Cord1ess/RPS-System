@@ -11,12 +11,12 @@ from PySide6.QtWidgets import (QButtonGroup, QComboBox, QDoubleSpinBox, QGridLay
 
 from rps.ui.base import Tab
 from rps.ui.common import LogView, ProcessRunner
-from rps.ui.style import PANEL, Card, Collapsible, button, caption, label, page_header, row, tip
+from rps.ui.style import PANEL, Card, Collapsible, button, caption, label, page_header, row, static_plot, tip
 
 EPOCH = re.compile(r"Epoch \[(\d+)/(\d+)\] loss ([\d.]+) acc\s+([\d.]+)%(?: \|\| val balanced acc\s+([\d.]+)%)?")
 FOLD = re.compile(r"\[train:holdout=([^\]]+)\]|\[train:all\]")
-LOPO_ROW = re.compile(r"^\s{2}(\S+)\s+balanced acc\s+([\d.]+)%")
-MEAN_ROW = re.compile(r"^\s{2}mean\s+([\d.]+)% \+/- ([\d.]+)%")
+LOPO_ROW = re.compile(r"^\s{2}(.+?)\s+balanced acc\s+([\d.]+)%")
+MEAN_ROW = re.compile(r"^\s{2}mean\s+([\d.]+)%\s+\+/-\s+([\d.]+)%")
 
 
 class TrainTab(Tab):
@@ -89,7 +89,7 @@ class TrainTab(Tab):
         self.fold_label = caption("Not started", "What is being trained right now.")
         prog.body.addWidget(self.fold_label)
         pg.setConfigOptions(antialias=True)
-        self.acc_plot = pg.PlotWidget()
+        self.acc_plot = static_plot(pg.PlotWidget())
         self.acc_plot.setBackground(PANEL)
         self.acc_plot.setLabel("left", "accuracy")
         self.acc_plot.setLabel("bottom", "pass")
@@ -103,8 +103,9 @@ class TrainTab(Tab):
         prog.body.addWidget(self.acc_plot, 1)
         self.folds = QTableWidget(0, 2)
         self.folds.setHorizontalHeaderLabels(["Person left out", "Accuracy"])
-        self.folds.horizontalHeaderItem(1).setToolTip("Balanced accuracy on that person (each gesture counts "
-                                                      "equally).")
+        self.folds.horizontalHeaderItem(0).setToolTip("The person the model was tested on and never trained on.")
+        self.folds.horizontalHeaderItem(1).setToolTip("Accuracy on that person, each gesture counting equally.")
+        tip(self.folds, "One row per person: accuracy when that person was left out of training.")
         self.folds.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.folds.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.folds.setMaximumHeight(140)
@@ -199,11 +200,14 @@ class TrainTab(Tab):
         self.start_btn.setEnabled(True)
         saved = code == 0 and os.path.exists(self.output.text()) and not self.mode_lopo.isChecked()
         self.use_btn.setEnabled(saved)
-        if code != 0:
+        if self.runner.cancelled:
+            self.fold_label.setText("Cancelled")
+        elif code != 0:
             self.fold_label.setText("Failed: see Output")
             self.output_box.toggle.setChecked(True)
         elif self.hist["val"] and not self.mode_lopo.isChecked():
-            self.result.setText(f"Best accuracy on {self.val_person.currentText()}: {max(self.hist['val']) * 100:.1f}%")
+            self.result.setText(f"Accuracy on {self.val_person.currentText()}, who the model never saw: "
+                                f"{self.hist['val'][-1] * 100:.1f}%")
         elif saved:
             self.result.setText("Model saved")
 

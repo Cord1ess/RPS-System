@@ -13,7 +13,7 @@ view (fingers pointing left) when the webcam sees fingers pointing up.
 """
 
 import time
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 import numpy as np
 import torch
@@ -23,6 +23,8 @@ from model import CLASS_NAMES, DEXTRA_TO_OURS, DextraRoshamboNet, RoshamboNet
 from rps.config import DvsConfig
 
 DVS_META_KEYS = ("sensor_size", "frame_size", "log_offset", "contrast_threshold", "clip_count")
+DVS_NAMES = {"sensor_size": "Motion grid", "frame_size": "Motion image size", "log_offset": "Dark noise damping",
+             "contrast_threshold": "Motion sensitivity", "clip_count": "Per-pixel cap"}
 
 
 class GestureCNN:
@@ -56,7 +58,7 @@ class GestureCNN:
         if self.meta.get("legacy_v2"):
             return ["checkpoint is a v2 binary-mask model; it was not trained on pseudo-DVS frames"]
         trained = self.meta.get("dvs", {})
-        return [f"dvs.{k}: runtime={getattr(dvs, k)} trained={trained[k]}"
+        return [f"'{DVS_NAMES[k]}' is {getattr(dvs, k)}, but the motion model was trained with {trained[k]}"
                 for k in DVS_META_KEYS if k in trained and trained[k] != getattr(dvs, k)]
 
     def orient(self, frame64: np.ndarray) -> np.ndarray:
@@ -100,7 +102,3 @@ def predict_batch(cnn: "GestureCNN", frames: np.ndarray, rotate: int = 0, flip: 
             out.append(p[:, cnn.order] if cnn.order is not None else p)
     return np.concatenate(out) if out else np.zeros((0, 4), np.float32)
 
-
-def summarize_meta(meta: Dict) -> str:
-    dvs = meta.get("dvs", {})
-    return ", ".join(f"{k}={dvs[k]}" for k in DVS_META_KEYS if k in dvs)

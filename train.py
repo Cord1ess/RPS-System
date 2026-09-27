@@ -9,7 +9,8 @@ Key differences from the v2 trainer (legacy/train_v2.py):
 3. Augmentations act on event frames: left/right flip (other hand), small rotation/translation/
    scale, event dropout, injected noise events. Frame-skip and multi-N variants come from
    build_dataset.py.
-4. Class weights from class frequencies; model selection by balanced accuracy.
+4. Class weights from class frequencies. The model kept is the final epoch: the held-out person
+   is only measured, never used to pick an epoch, so their balanced accuracy stays honest.
 5. The checkpoint stores the DVS emulator parameters so the runtime can warn on mismatch.
 
 Usage:
@@ -114,8 +115,15 @@ def train_fold(train_x, train_y, val_x, val_y, args, tag: str):
     print(f"[train:{tag}] train {len(train_y)} frames {dict(sorted(Counter(train_y.tolist()).items()))} | "
           f"val {len(val_y) if val_y is not None else 0} | class weights {np.round(weights.numpy(), 2).tolist()}")
 
+    missing = [CLASS_NAMES[c] for c in range(len(CLASS_NAMES)) if not np.any(train_y == c)]
+    if missing:
+        print(f"[train:{tag}] WARNING: no training images of {', '.join(missing)}: the model cannot learn "
+              f"{'it' if len(missing) == 1 else 'them'}. Record those sessions (No hand = background).")
+
+    # The held-out person is only measured, never used to pick the epoch: choosing the best epoch on
+    # them would make their score an optimistic estimate. The model kept is the final epoch.
     history = {"train_loss": [], "train_acc": [], "val_bal_acc": []}
-    best_state, best_bal = None, -1.0
+    final_bal = None
     for epoch in range(1, args.epochs + 1):
         model.train()
         order = rng.permutation(len(train_y))
@@ -136,24 +144,18 @@ def train_fold(train_x, train_y, val_x, val_y, args, tag: str):
         history["train_acc"].append(correct / max(seen, 1))
         msg = f"Epoch [{epoch:02d}/{args.epochs}] loss {history['train_loss'][-1]:.4f} acc {history['train_acc'][-1] * 100:5.1f}%"
         if val_y is not None and len(val_y):
-            bal = balanced_accuracy(val_y, predict(model, val_x))
-            history["val_bal_acc"].append(bal)
-            msg += f" || val balanced acc {bal * 100:5.1f}%"
-            if bal > best_bal:
-                best_bal, best_state = bal, {k: v.clone() for k, v in model.state_dict().items()}
-                msg += " <-- BEST"
+            final_bal = balanced_accuracy(val_y, predict(model, val_x))
+            history["val_bal_acc"].append(final_bal)
+            msg += f" || val balanced acc {final_bal * 100:5.1f}%"
         print(msg)
-    if best_state is None:   # --all: keep the final epoch
-        best_state = {k: v.clone() for k, v in model.state_dict().items()}
-    model.load_state_dict(best_state)
-    return model, history, best_bal
+    return model, history, final_bal
 
 
 def report(model, parts_val: List[Dict], plot_path: str, history: Dict):
     x, y = stack(parts_val)
     p = predict(model, x)
     present = sorted(set(y.tolist()) | set(p.tolist()))
-    print("\n--- Held-out classification report (best checkpoint) ---")
+    print("\n--- Held-out classification report (final model) ---")
     print(classification_report(y, p, labels=present, target_names=[CLASS_NAMES[i] for i in present],
                                 zero_division=0))
     print("Confusion matrix (rows = true, cols = predicted):")
@@ -223,8 +225,8 @@ def main():
             tr = [p for p in parts if p["person"] != person]
             va = [p for p in parts if p["person"] == person]
             (tx, ty), (vx, vy) = stack(tr), stack(va)
-            _, _, best = train_fold(tx, ty, vx, vy, args, tag=f"holdout={person}")
-            scores[person] = best
+            _, _, final = train_fold(tx, ty, vx, vy, args, tag=f"holdout={person}")
+            scores[person] = final
         print("\n=========== LEAVE-ONE-PERSON-OUT ===========")
         for person, s in scores.items():
             print(f"  {person:12s} balanced acc {s * 100:5.1f}%")
@@ -247,11 +249,14 @@ def main():
         print(f"[train] No --val_person given; holding out '{val_person}'.")
     if val_person not in persons:
         raise SystemExit(f"--val_person '{val_person}' not found; people: {persons}")
+    if len(persons) < 2:
+        raise SystemExit(f"'{val_person}' is the only person recorded, so nobody is left to train on. Record "
+                         f"another person, or train on everyone (--all).")
     tr = [p for p in parts if p["person"] != val_person]
     va = [p for p in parts if p["person"] == val_person]
     (tx, ty), (vx, vy) = stack(tr), stack(va)
-    model, history, best = train_fold(tx, ty, vx, vy, args, tag=f"holdout={val_person}")
-    save_checkpoint(model, args.output, index, args, [p for p in persons if p != val_person], val_person, best)
+    model, history, final = train_fold(tx, ty, vx, vy, args, tag=f"holdout={val_person}")
+    save_checkpoint(model, args.output, index, args, [p for p in persons if p != val_person], val_person, final)
     report(model, va, args.metrics_plot, history)
 
 

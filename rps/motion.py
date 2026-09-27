@@ -14,6 +14,8 @@ from typing import Optional
 import cv2
 import numpy as np
 
+MAX_PUMP_INTERVAL_S = 1.2   # a longer gap between bottoms is a pause (e.g. after a throw), not the pump rhythm
+
 
 class VerticalMotion:
     def __init__(self, size: int = 64, min_flow_px: float = 0.5, min_moving_fraction: float = 0.01):
@@ -165,10 +167,13 @@ class RhythmPumpDetector:
         self.pending_bottom = False
         t = self.down_end_t
         tempo = self.tempo
-        min_gap = max(self.base_period, 0.45 * tempo) if tempo else self.base_period
-        if t - self.last_bottom_t < min_gap:
+        # Only rejects jitter (two bottoms within a fraction of a beat). A large factor here would
+        # make a wrongly learned slow tempo reject the real pumps and never correct itself.
+        min_gap = max(self.base_period, 0.3 * tempo) if tempo else self.base_period
+        gap = t - self.last_bottom_t
+        if gap < min_gap:
             return None
-        if t - self.last_bottom_t < 3.0:
-            self._remember(self.intervals, t - self.last_bottom_t)
+        if gap <= MAX_PUMP_INTERVAL_S:
+            self._remember(self.intervals, gap)
         self.last_bottom_t = t
         return "bottom"

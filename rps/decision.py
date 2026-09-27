@@ -36,6 +36,7 @@ COUNTER_POSE = {g: POSE_LETTER[COUNTER_MOVES[g]["ai_symbol"]] for g in (ROCK, PA
 GESTURE_NAME = {ROCK: "rock", PAPER: "paper", SCISSORS: "scissors", BACKGROUND: "background", -1: "unknown"}
 
 IDLE, ARMED, SHOOT, HOLD = "IDLE", "ARMED", "SHOOT", "HOLD"
+TRACKER_FRESH_S = 0.1    # a hand-tracker reading older than this cannot block the motion model
 
 
 @dataclass
@@ -127,6 +128,8 @@ class DecisionEngine:
         vote = None
         if obs.cnn is not None and self.use_cnn:
             vote = self.voter.update(obs.cnn[0], obs.cnn[1], t)
+            if vote is not None and self._tracker_contradicts(vote, t):
+                vote = None
             self.cnn_vote = vote
             if vote in (ROCK, PAPER, SCISSORS):
                 self.last_vote, self.last_vote_t = vote, t
@@ -190,6 +193,19 @@ class DecisionEngine:
     def _mp_stable(self) -> bool:
         return self.mp_gesture is not None and self.mp_count >= self.cfg.mp_stable_frames
 
+    def _tracker_contradicts(self, vote: int, t: float) -> bool:
+        """
+        A steady, current hand-tracker reading that disagrees blocks a motion-model vote: on a webcam
+        the tracker is far more accurate per frame. In countdown the pumping fist is expected to
+        open, so there only a paper/scissors reading can block, and the motion model keeps its head
+        start on the throw.
+        """
+        if not self.use_mp or vote not in (ROCK, PAPER, SCISSORS) or not self._mp_stable():
+            return False
+        if t - self.last_hand_t > TRACKER_FRESH_S or self.mp_gesture == vote:
+            return False
+        return self.mode == "continuous" or self.mp_gesture in (PAPER, SCISSORS)
+
     def _mp_eligible(self, t: float, events_in_hand: Optional[int]) -> bool:
         if not self._mp_stable():
             return False
@@ -242,12 +258,13 @@ class DecisionEngine:
         return None
 
     # ---------------------------------------------------------------- countdown mode
-    def _enter(self, state: str, t: float, reason: str) -> Optional[str]:
+    def _enter(self, state: str, t: float, reason: str, reset_pump: bool = True) -> Optional[str]:
         self.state = state
         self.reason = reason
         if state in (IDLE, ARMED):
             self.pumps = 0
-            self.pump.reset()                  # keeps the learned rhythm
+            if reset_pump:
+                self.pump.reset()              # keeps the learned rhythm
             self.voter.reset()
             self.human = None
             if state == ARMED or self.cfg.idle_action == "ready":
@@ -271,15 +288,21 @@ class DecisionEngine:
         if self.state == ARMED:
             if self._idle(t):
                 return self._enter(IDLE, t, "no hand")
+            enough = self.pumps >= max(1, cfg.pumps_before_shoot - cfg.pump_miss_tolerance)
             if event == "bottom":
                 self.pumps += 1
                 self.last_bottom_t = t
                 self.reason = f"pump {self.pumps}"
                 if self.pumps >= cfg.pumps_before_shoot:
                     self._enter(SHOOT, t, "throw")
-            elif event == "landed" and self.pumps >= max(1, cfg.pumps_before_shoot - cfg.pump_miss_tolerance):
+            elif event == "landed" and enough:
                 self._enter(SHOOT, t, "throw landed")
                 self.shoot_landed = True
+                return self._shoot_decide(t, vote)
+            elif enough and self._open_hand(vote):
+                # Paper/scissors after the pumps is the throw itself, whatever beat it came on
+                # (players throw on the 3rd or the 4th down stroke).
+                self._enter(SHOOT, t, "throw")
                 return self._shoot_decide(t, vote)
             return None
 
@@ -300,15 +323,22 @@ class DecisionEngine:
             held = t - self.commit_t
             if held >= cfg.hold_max_s:
                 return self._enter(ARMED, t, "hold expired")
-            if held >= cfg.hold_min_s:
-                if self._idle(t):
-                    return self._enter(IDLE, t, "hand left")
-                if event == "bottom":
-                    out = self._enter(ARMED, t, "new round")
-                    self.pumps = 1
-                    self.last_bottom_t = t
-                    return out
+            if held < cfg.hold_min_s:
+                self.pump.reset()                  # settling after the throw is not part of the next rhythm
+                return None
+            if self._idle(t):
+                return self._enter(IDLE, t, "hand left")
+            if event == "bottom":                  # the next round's first pump; the robot keeps its move until now
+                out = self._enter(ARMED, t, "new round", reset_pump=False)   # this pump starts the rhythm
+                self.pumps = 1
+                self.last_bottom_t = t
+                return out
         return None
+
+    def _open_hand(self, vote: Optional[int]) -> bool:
+        """Paper or scissors is being shown (a pumping fist never is)."""
+        return vote in (PAPER, SCISSORS) or \
+            (self.use_mp and self._mp_stable() and self.mp_gesture in (PAPER, SCISSORS))
 
     def _shoot_decide(self, t: float, vote: Optional[int]) -> Optional[str]:
         """Commits the throw as soon as the evidence allows it."""
@@ -333,4 +363,7 @@ class DecisionEngine:
         out = self._commit(gesture, source, t, force=True)
         self.state = HOLD
         self.reason = f"{GESTURE_NAME[gesture]} via {source}"
+        # The round is over: drop the throw's own stroke so it is never counted as the next round's
+        # pump, and do not let the pause after the throw count as a pump interval.
+        self.pump.reset()
         return out

@@ -83,9 +83,14 @@ def main():
         print(f"[latency] off level {off:.1f}, on level {on:.1f}, threshold {threshold:.1f}")
 
         latencies = []
+        period = 1.0 / max(cfg.camera.fps, 1)
         for trial in range(args.trials):
             stimulus(False)
-            level_after(cam, random.uniform(0.4, 0.8))
+            level_after(cam, 0.5)
+            # level_after() returns just after a frame arrived; without a random wait the stimulus would
+            # always land at the same point of the frame cycle and every trial would read the same
+            # whole number of frame periods instead of the average latency.
+            time.sleep(random.uniform(0.0, period))
             t_on = stimulus(True)
             t_end = t_on + 1.0
             while time.perf_counter() < t_end:

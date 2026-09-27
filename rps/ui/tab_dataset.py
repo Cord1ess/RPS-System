@@ -12,14 +12,12 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout
                                QMessageBox, QProgressBar, QScrollArea, QTableWidget, QTableWidgetItem, QVBoxLayout,
                                QWidget)
 
-from model import CLASS_NAMES
 from rps.recorder import list_recordings
 from rps.ui.base import Tab
 from rps.ui.common import LogView, ProcessRunner, to_pixmap
 from rps.ui.style import Card, Collapsible, button, caption, label, page_header, row, tip
 
 BUILD_PROGRESS = re.compile(r"\[build\] \((\d+)/(\d+)\)")
-CLASS_SHORT = [c.split("_", 1)[1] for c in CLASS_NAMES]
 CLASS_TITLE = ["Rock", "Paper", "Scissors", "None"]
 TYPE_NAME = {"show": "Hold gesture", "throws": "Throws", "background": "No hand"}
 
@@ -61,6 +59,7 @@ class DatasetTab(Tab):
         self.rec_table = _table(["Person", "Type", "Gesture", "Frames", "fps", "Seconds", "MB", "File"],
                                 ["Who recorded it", "Session type", "Gesture", "Frames saved", "Measured frame rate",
                                  "Length", "Size on disk", "File check: saved frames match the video"])
+        tip(self.rec_table, "Every recording. Select rows to open or delete them.")
         self.rec_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.rec_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.rec_table.setMinimumHeight(170)
@@ -127,6 +126,7 @@ class DatasetTab(Tab):
         self.frames_table = _table(["Person"] + CLASS_TITLE + ["Total"],
                                    ["Person"] + [f"Training images labelled {c.lower()}" for c in CLASS_TITLE]
                                    + ["All training images"])
+        tip(self.frames_table, "Training images per person and gesture, after the label check.")
         self.frames_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.frames_table.setMaximumHeight(150)
         check.body.addWidget(self.frames_table)
@@ -220,7 +220,7 @@ class DatasetTab(Tab):
             return
         counts = self.event_counts.currentText().replace(" ", "")
         args = ["build_dataset.py", "--recordings", self.state.recordings_root, "--out", self.state.frames_root,
-                "--config", self.state.config_path, "--event_counts", counts,
+                "--config", self.state.run_config(), "--event_counts", counts,
                 "--frame_skips", "1,2" if self.slow_cam.isChecked() else "1",
                 "--clean_conf", f"{self.clean_conf.value():.2f}", "--lookahead", f"{self.lookahead.value():.2f}"]
         if not self.use_mp.isChecked():
@@ -232,8 +232,11 @@ class DatasetTab(Tab):
 
     def _built(self, code: int):
         self.build_btn.setEnabled(True)
-        self.build_status.setText("Done" if code == 0 else "Failed: see Build output")
-        if code != 0:
+        if self.runner.cancelled:
+            self.build_status.setText("Cancelled")
+        else:
+            self.build_status.setText("Done" if code == 0 else "Failed: see Build output")
+        if code != 0 and not self.runner.cancelled:
             self.output.toggle.setChecked(True)
         self._refresh_frames()
 

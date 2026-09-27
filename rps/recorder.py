@@ -94,6 +94,29 @@ def count_video_frames(path: str) -> int:
     return n
 
 
+def video_frame_size(path: str) -> Optional[tuple]:
+    """(width, height) of the first decoded frame, or None."""
+    cap = cv2.VideoCapture(path, cv2.CAP_FFMPEG)
+    ok, img = cap.read()
+    cap.release()
+    return (img.shape[1], img.shape[0]) if ok else None
+
+
+def even_span(lo: int, hi: int, keep_lo: int, keep_hi: int, limit: int) -> tuple:
+    """
+    [lo, hi) adjusted to an even length that still contains [keep_lo, keep_hi) and stays inside
+    [0, limit). The video encoder silently drops the last row/column of odd-sized frames, which
+    would cut into the play zone.
+    """
+    if (hi - lo) % 2 == 0:
+        return lo, hi
+    if hi > keep_hi:
+        return lo, hi - 1
+    if lo < keep_lo:
+        return lo + 1, hi
+    return (lo, hi + 1) if hi < limit else (lo - 1, hi)
+
+
 def folder_size_mb(path: str) -> float:
     total = 0
     for root, _, files in os.walk(path):
@@ -116,7 +139,8 @@ class SessionRecorder:
             raise ValueError("person is required")
         self.cfg = cfg
         self.person, self.kind, self.label = person.strip(), kind, label
-        self.duration_s, self.throws, self.hand = duration_s, throws, hand
+        self.duration_s, self.hand = duration_s, hand
+        self.throws = throws if kind == "throws" else 0
         self.lighting, self.notes = lighting, notes
         self.camera_info = camera_info or {}
         self.session_id = f"{time.strftime('%Y%m%d-%H%M%S')}_{kind}_{label}"
@@ -134,6 +158,8 @@ class SessionRecorder:
     def start(self, frame: Frame, roi: Roi):
         h, w = frame.bgr.shape[:2]
         x0, y0, x1, y1 = margin_box(roi, self.cfg.roi.record_margin, w, h)
+        x0, x1 = even_span(x0, x1, roi[0], roi[0] + roi[2], w)
+        y0, y1 = even_span(y0, y1, roi[1], roi[1] + roi[2], h)
         self.crop_box = [x0, y0, x1, y1]
         self.roi_camera = list(roi)
         self.roi_in_crop = [roi[0] - x0, roi[1] - y0, roi[2]]
@@ -160,10 +186,6 @@ class SessionRecorder:
     def dropped(self) -> int:
         return self.writer.dropped if self.writer else 0
 
-    def roi_crop(self, frame: Frame) -> np.ndarray:
-        x, y, s = self.roi_camera
-        return frame.bgr[y:y + s, x:x + s]
-
     def abort(self):
         if self.writer is not None:
             self.writer.close()
@@ -181,8 +203,9 @@ class SessionRecorder:
             wr = csv.writer(f)
             wr.writerow(["index", "t", "camera_frame_id"])
             wr.writerows(self.rows)
-        n_video = (count_video_frames(self.writer.path) if self.writer.video_file == "video.mkv"
-                   else self.writer.written)
+        is_video = self.writer.video_file == "video.mkv"
+        n_video = count_video_frames(self.writer.path) if is_video else self.writer.written
+        size_ok = (not is_video) or video_frame_size(self.writer.path) == tuple(self.writer.size)
         duration = self.rows[-1][1]
         meta = {
             "session_id": self.session_id,
@@ -195,7 +218,7 @@ class SessionRecorder:
             "throws_planned": self.throws,
             "frames": len(self.rows),
             "video_frames": n_video,
-            "video_check_ok": n_video == len(self.rows),
+            "video_check_ok": n_video == len(self.rows) and size_ok,
             "dropped_by_writer": self.writer.dropped,
             "missed_by_reader": self.missed,
             "duration_s": duration,

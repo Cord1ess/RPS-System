@@ -18,6 +18,7 @@ from collections import deque
 from typing import Dict, Optional
 
 POSES = ("R", "P", "S", "N")
+ESP_RST_BROWNOUT = 9    # esp_reset_reason(): the supply dipped (usually servos on the ESP32's own power)
 
 
 def encode_pose(seq: int, pose: str, pc_ms: int) -> bytes:
@@ -53,6 +54,10 @@ def parse_message(data: bytes) -> Optional[Dict]:
 
 class RobotLink:
     def __init__(self, host: str, port: int = 4210, heartbeat_s: float = 0.1, ack_timeout_s: float = 0.5):
+        try:
+            host = socket.gethostbyname(host)      # once: a name lookup per send would stall the decision thread
+        except OSError:
+            pass
         self.addr = (host, port)
         self.heartbeat_s = heartbeat_s
         self.ack_timeout_s = ack_timeout_s
@@ -71,6 +76,9 @@ class RobotLink:
         self.acked = 0
         self.last_ack_t = 0.0
         self.last_reset_reason: Optional[int] = None
+        self.reboots = 0                   # times the robot restarted while linked (its clock went back)
+        self._last_esp_ms: Optional[int] = None
+        self._send_error: Optional[str] = None
 
     def start(self) -> "RobotLink":
         self._running = True
@@ -87,16 +95,20 @@ class RobotLink:
             self.sock.sendto(payload, self.addr)
             self._pending[seq] = time.perf_counter()
             self.sent += 1
+            self._send_error = None
         except OSError as e:
-            print(f"[robot_link] send failed: {e}")
+            if str(e) != self._send_error:        # report each new problem once, not every heartbeat
+                self._send_error = str(e)
+                print(f"[robot_link] send failed: {e}")
 
     def send_pose(self, pose: str) -> int:
         """Sends immediately (called from the decision thread the moment a pose changes)."""
         with self._lock:
-            self._pose = pose
             self._seq += 1
             seq = self._seq
-            self._send(encode_pose(seq, pose, self._now_ms()), seq)
+            payload = encode_pose(seq, pose, self._now_ms())   # raises on a bad pose before anything changes
+            self._pose = pose
+            self._send(payload, seq)
             self._next_heartbeat = time.perf_counter() + self.heartbeat_s
         return seq
 
@@ -107,24 +119,28 @@ class RobotLink:
             self._send(encode_led(seq, on), seq)
         return seq
 
-    @property
-    def pose(self) -> str:
-        return self._pose
+    def _on_ack(self, msg: Dict, sender) -> None:
+        if tuple(sender[:2]) != self.addr:
+            return                                 # not our robot (it replies from its own port)
+        with self._lock:
+            t_sent = self._pending.pop(msg["seq"], None)
+        self.last_ack_t = time.perf_counter()      # any reply from the robot shows the link is alive
+        if self._last_esp_ms is not None and msg["esp_ms"] + 1000 < self._last_esp_ms:
+            self.reboots += 1                      # the robot's clock went back: it restarted
+        self._last_esp_ms = msg["esp_ms"]
+        self.last_reset_reason = msg["reset"]
+        if t_sent is not None:                     # count each message once; duplicates and strays are ignored
+            self.acked += 1
+            self.rtts_ms.append((self.last_ack_t - t_sent) * 1000.0)
 
     def _loop(self):
         self._next_heartbeat = time.perf_counter() + self.heartbeat_s
         while self._running:
             try:
-                data, _ = self.sock.recvfrom(256)
+                data, sender = self.sock.recvfrom(256)
                 msg = parse_message(data)
                 if msg and msg["type"] == "A":
-                    with self._lock:
-                        t_sent = self._pending.pop(msg["seq"], None)
-                    if t_sent is not None:
-                        self.rtts_ms.append((time.perf_counter() - t_sent) * 1000.0)
-                    self.acked += 1
-                    self.last_ack_t = time.perf_counter()
-                    self.last_reset_reason = msg["reset"]
+                    self._on_ack(msg, sender)
             except socket.timeout:
                 pass
             except OSError:
@@ -135,7 +151,8 @@ class RobotLink:
                 if now >= self._next_heartbeat:
                     self._seq += 1
                     self._send(encode_pose(self._seq, self._pose, self._now_ms()), self._seq)
-                    self._next_heartbeat = now + self.heartbeat_s
+                    # a fixed rhythm: late wake-ups (Windows timer resolution) must not add up
+                    self._next_heartbeat = max(self._next_heartbeat + self.heartbeat_s, now)
                 stale = [s for s, ts in self._pending.items() if now - ts > self.ack_timeout_s]
                 for s in stale:
                     del self._pending[s]
@@ -152,6 +169,7 @@ class RobotLink:
             "rtt_median_ms": rtt[len(rtt) // 2] if rtt else None,
             "rtt_p90_ms": rtt[int(len(rtt) * 0.9)] if rtt else None,
             "last_reset_reason": self.last_reset_reason,
+            "reboots": self.reboots,
         }
 
     def stop(self, send_ready: bool = True):
@@ -203,7 +221,11 @@ class MockEsp:
                     print(f"[mock_esp] t={esp_ms:7d} ms  seq={msg['seq']:6d}  POSE -> {self.pose}")
             elif msg["type"] == "L" and self.verbose:
                 print(f"[mock_esp] t={esp_ms:7d} ms  LED {'ON' if msg['on'] else 'OFF'}")
-            self.sock.sendto(encode_ack(msg["seq"], esp_ms, 0), addr)
+            if msg["type"] in ("P", "L"):
+                try:
+                    self.sock.sendto(encode_ack(msg["seq"], esp_ms, 1), addr)   # 1 = ESP_RST_POWERON
+                except OSError:
+                    pass
 
     def stop(self):
         self._running = False

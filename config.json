@@ -34,7 +34,7 @@
     "max_accumulation_s": 0.5
   },
   "cnn": {
-    "model_path": "models/motion_cnn_v3.pth",
+    "model_path": "models/dextra_roshambo.pth",
     "threads": 1,
     "rotate": 0,
     "flip": false
@@ -71,14 +71,13 @@
     "idle_timeout_s": 1.0,
     "idle_action": "ready",
     "pumps_before_shoot": 3,
-    "pump_source": "auto",
+    "pump_source": "flow",
     "pump_miss_tolerance": 1,
     "pump_min_amplitude": 0.08,
     "pump_min_period_s": 0.18,
     "shoot_window_s": 1.2,
-    "rock_min_shoot_s": 0.15,
     "rock_settle_fallback_s": 0.35,
-    "hold_min_s": 1.0,
+    "hold_min_s": 0.3,
     "hold_max_s": 4.0,
     "correction_s": 0.0
   },

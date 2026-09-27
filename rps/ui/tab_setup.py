@@ -1,17 +1,20 @@
 """Setup page: camera, play zone, robot hand. Manual settings and tools are folded away."""
 
+import re
+
 import cv2
 import numpy as np
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
 
 from rps.camera import crop_roi, margin_box
-from rps.robot_link import MockEsp, RobotLink
+from rps.robot_link import ESP_RST_BROWNOUT, MockEsp, RobotLink
 from rps.ui.base import Tab
 from rps.ui.common import ConfigForm, LogView, ProcessRunner, VideoView
 from rps.ui.style import Card, Chip, Collapsible, button, caption, page_header, row, tip
 
 SOURCES = [("camera", "Webcam"), ("mock", "Simulated camera"), ("video", "Recorded session")]
+LATENCY_RESULT = re.compile(r"^\[latency\] \w+: median ([\d.]+) ms")
 
 
 class SetupTab(Tab):
@@ -27,6 +30,7 @@ class SetupTab(Tab):
         self.runner = ProcessRunner(self)
         self.log = LogView()
         self.runner.line.connect(self.log.log)
+        self.runner.line.connect(self._tool_line)
         self.runner.finished.connect(self._process_done)
         self._link = self._mock = None
         self._after = ""
@@ -203,32 +207,50 @@ class SetupTab(Tab):
         src = self.main.worker.source
         if src is not None:
             x, y, size = src.roi
+        self.roi_btn.setChecked(False)
+        if self.main.worker.kind != "camera":
+            # a recording or the simulated camera has its own frame: its coordinates are not the webcam's
+            self.light_hint.setText("Play zone changed for this view only. Set it on the webcam to keep it.")
+            return
         roi = self.state.cfg.roi
         roi.x, roi.y, roi.size = int(x), int(y), int(size)
         self.state.mark_dirty()
-        self.roi_btn.setChecked(False)
+
+    def _run_tool(self, after: str, args):
+        """Runs a Setup tool that needs the webcam to itself; the camera restarts when it finishes."""
+        if self.runner.running():
+            return
+        self.main.stop_camera()
+        self.main.camera_blocked = True
+        self.output.toggle.setChecked(True)
+        self._after = after
+        self.runner.start(args)
 
     def _probe(self):
-        if self.runner.running():
-            return
-        self.main.stop_camera()
-        self.output.toggle.setChecked(True)
         self.log.log("Auto-configure: measuring each camera mode...")
-        self._after = "probe"
-        self.runner.start(["tools/camera_probe.py", "--write-config", "--config", self.state.config_path])
+        self._run_tool("probe", ["tools/camera_probe.py", "--write-config", "--config", self.state.config_path])
 
     def _latency(self, mode: str):
-        if self.runner.running():
-            return
-        self.main.stop_camera()
-        self.output.toggle.setChecked(True)
-        self._after = "latency"
-        self.runner.start(["tools/latency_test.py", "--mode", mode, "--config", self.state.config_path])
+        self._run_tool("latency", ["tools/latency_test.py", "--mode", mode, "--config", self.state.run_config()])
+
+    def _tool_line(self, line: str):
+        m = LATENCY_RESULT.search(line)
+        if m and self._after == "latency":
+            ms = float(m.group(1))
+            self.state.cfg.latency.camera_latency_ms = round(ms, 1)
+            self.state.mark_dirty()
+            self.log.log(f"Camera delay set to {ms:.0f} ms. Save setup to keep it.")
 
     def _process_done(self, code):
-        if self._after == "probe" and code == 0:
-            self.state.reload()
-            self.log.log("Camera settings saved. Start the camera to use them.")
+        self.main.camera_blocked = False
+        if self._after == "probe":
+            if code == 0:
+                self.state.reload(["camera"])
+                self.log.log("Camera settings saved.")
+            else:
+                self.log.log("Auto-configure did not finish; camera settings unchanged.")
+        if self.main.current_page().uses_camera:
+            self.main.start_camera()
 
     def _test_link(self):
         if self._link is not None:
@@ -237,9 +259,10 @@ class SetupTab(Tab):
         if self.mock_chk.isChecked():
             try:
                 self._mock = MockEsp(port=port, verbose=False).start()
-            except OSError as e:
+            except OSError:
                 self.chip_link.set("Simulated robot failed", "bad")
-                self.link_hint.setText(str(e))
+                self.link_hint.setText(f"Port {port} is already in use on this computer, probably by a running "
+                                       f"game or another simulated robot. Stop it and test again.")
                 return
             host = "127.0.0.1"
         self._link = RobotLink(host, port, heartbeat_s=0.05).start()
@@ -257,10 +280,11 @@ class SetupTab(Tab):
             self._mock = None
         if stats["acked"]:
             name = "Simulated robot" if simulated else "Robot"
-            self.chip_link.set(f"{name} replied {stats['acked']}/{stats['sent']} · {stats['rtt_median_ms']:.1f} ms",
-                               "ok")
-            self.link_hint.setText("The robot recently restarted from a power dip: give the servos their own supply."
-                                   if stats["last_reset_reason"] == 15 else "")
+            rtt = stats["rtt_median_ms"]
+            self.chip_link.set(f"{name} replied {stats['acked']}/{stats['sent']}"
+                               + (f" · {rtt:.1f} ms" if rtt is not None else ""), "ok")
+            self.link_hint.setText("The robot last restarted from a power dip: give the servos their own supply."
+                                   if stats["last_reset_reason"] == ESP_RST_BROWNOUT else "")
         else:
             self.chip_link.set(f"No reply (0/{stats['sent']})", "bad")
             self.link_hint.setText("Check: laptop on the RPS-HAND Wi-Fi, address and port match the firmware, "

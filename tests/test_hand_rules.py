@@ -58,3 +58,15 @@ def test_hysteresis_keeps_state_inside_band():
     _, _, prev = classify_curls([0.9, 0.05, 0.9, 0.9], None, EXT, CURL)
     g, _, ext = classify_curls(curls, prev, EXT, CURL)
     assert ext[0] is False and g == ROCK
+
+
+def test_sideways_scissors_with_hidden_middle_finger():
+    # index straight, middle hidden behind it (read as slightly bent), ring + pinky bent
+    g, _, _ = classify_curls([0.2, 0.5, 0.7, 0.7], None, 0.30, 0.45)
+    assert g == SCISSORS
+    # a fist stays rock even with a loose middle finger: the index is bent
+    g, _, _ = classify_curls([0.7, 0.5, 0.7, 0.7], None, 0.30, 0.45)
+    assert g == ROCK
+    # a clearly bent middle finger with only the index out is not scissors
+    g, _, _ = classify_curls([0.2, 0.8, 0.7, 0.7], None, 0.30, 0.45)
+    assert g == ROCK

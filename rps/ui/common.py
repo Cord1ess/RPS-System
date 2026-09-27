@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 from dataclasses import fields
 from typing import Dict, List, Optional
 
@@ -39,6 +40,7 @@ class AppState(QObject):
         self.frames_root = os.path.join(data_root, "frames")
         self.analysis_root = os.path.join(data_root, "analysis")
         self.cfg: Config = load_config(config_path)
+        self._run_files: List[str] = []
         self.dirty = False
 
     def mark_dirty(self):
@@ -50,11 +52,34 @@ class AppState(QObject):
         self.dirty = False
         self.config_changed.emit()
 
-    def reload(self):
+    def run_config(self) -> str:
+        """
+        Writes the settings as they are now (including unsaved edits) to a new file for one
+        background job, so a job always uses what the screen showed when it started, not the last
+        saved config.json. The files are removed by cleanup() when the app closes.
+        """
+        fd, path = tempfile.mkstemp(prefix="rps_run_config_", suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(self.cfg.to_dict(), f, indent=2)
+        self._run_files.append(path)
+        return path
+
+    def cleanup(self):
+        for path in self._run_files:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        self._run_files = []
+
+    def reload(self, sections: Optional[List[str]] = None):
+        """Re-reads config.json; with `sections`, only those (other unsaved edits are kept)."""
         new = load_config(self.config_path)
         for f in fields(Config):             # update in place so every holder sees the change
-            setattr(self.cfg, f.name, getattr(new, f.name))
-        self.dirty = False
+            if sections is None or f.name in sections:
+                setattr(self.cfg, f.name, getattr(new, f.name))
+        if sections is None:
+            self.dirty = False
         self.config_changed.emit()
 
     def reset_defaults(self):
@@ -185,6 +210,7 @@ class ProcessRunner(QObject):
         super().__init__(parent)
         self.proc: Optional[QProcess] = None
         self._buf = ""
+        self.cancelled = False           # the last job was stopped with kill(), not failed
 
     def running(self) -> bool:
         return self.proc is not None and self.proc.state() != QProcess.ProcessState.NotRunning
@@ -193,6 +219,9 @@ class ProcessRunner(QObject):
         if self.running():
             raise RuntimeError("a process is already running")
         self._buf = ""
+        self.cancelled = False
+        if self.proc is not None:
+            self.proc.deleteLater()      # the previous job's finished process
         proc = QProcess(self)
         env = QProcessEnvironment.systemEnvironment()
         env.insert("PYTHONUNBUFFERED", "1")
@@ -222,6 +251,7 @@ class ProcessRunner(QObject):
 
     def kill(self):
         if self.running():
+            self.cancelled = True
             self.proc.kill()
 
 
@@ -339,7 +369,13 @@ class ConfigForm(QWidget):
         self.state.config_changed.emit()
 
     def _set_json(self, name: str, text: str):
+        """Accepts only a {name: number} table (the one dictionary setting); otherwise restores the value."""
         try:
-            self._set(name, json.loads(text))
+            value = json.loads(text)
         except ValueError:
+            value = None
+        if isinstance(value, dict) and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                                           for v in value.values()):
+            self._set(name, {str(k): float(v) for k, v in value.items()})
+        else:
             self.refresh()

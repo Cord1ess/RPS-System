@@ -235,7 +235,7 @@ class VideoFileSource:
 
 class MockSource:
     """
-    Synthetic scene: textured background with a bright blob that pumps up and down,
+    Synthetic scene: textured background with a bright blob that pumps up and down (1.5 Hz),
     then holds still. Produces real pseudo-events without a camera.
     """
 
@@ -265,7 +265,7 @@ class MockSource:
         img = cv2.cvtColor(self.background, cv2.COLOR_GRAY2BGR)
         x, y, size = self.roi
         cycle = t % 4.0
-        # 0-2 s: pump (3 Hz vertical motion), 2-4 s: hold still
+        # 0-2 s: pump (1.5 Hz vertical motion), 2-4 s: hold still
         offset = 0.18 * size * np.sin(2 * np.pi * 1.5 * cycle) if cycle < 2.0 else 0.0
         cx, cy = x + size // 2, int(y + size // 2 + offset)
         cv2.ellipse(img, (cx, cy), (size // 6, size // 5), 0, 0, 360, (210, 200, 190), -1)

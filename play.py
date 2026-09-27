@@ -14,6 +14,7 @@ Keys: q/ESC quit | m toggle continuous/countdown | r reset counters
 
 import argparse
 import sys
+import time
 
 import cv2
 
@@ -93,7 +94,8 @@ def main():
             if frame is None:
                 if args.video:
                     break
-                print("[play] No frame from camera (timeout).")
+                print("[play] No frame from camera (timeout): robot to ready until frames return.")
+                pipeline.set_mode(pipeline.engine.mode, time.perf_counter())   # restart the game, send READY
                 continue
             result = pipeline.step(frame, source.roi)
             log.add(pipeline.log_record(result))

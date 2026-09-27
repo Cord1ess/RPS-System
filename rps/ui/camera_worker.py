@@ -17,6 +17,8 @@ from PySide6.QtCore import QThread, Signal
 
 from rps.camera import clamp_roi, open_source
 
+STALL_S = 1.5      # no frame for this long from a live source: report "stalled"
+
 
 class CameraWorker(QThread):
     frame_ready = Signal()
@@ -51,8 +53,14 @@ class CameraWorker(QThread):
             payload, self._latest = self._latest, None
         return payload
 
-    def run(self):
+    def begin(self, kind: str, video_path: Optional[str] = None):
+        """Starts the thread. The stop flag is cleared here, not in run(), so a stop() issued right
+        after begin() can never be lost."""
+        self.kind, self.video_path = kind, video_path
         self._stop = False
+        self.start()
+
+    def run(self):
         cfg = self.state.cfg
         try:
             src = open_source(cfg.camera, cfg.roi, video=self.video_path if self.kind == "video" else None,
@@ -64,13 +72,21 @@ class CameraWorker(QThread):
         self.info = dict(getattr(src, "info", {}) or {})
         self.state_changed.emit("running")
         stamps = deque(maxlen=30)
+        last_frame, stalled = time.perf_counter(), False
         try:
             while not self._stop:
-                frame = src.read(timeout=1.0)
+                frame = src.read(timeout=0.5)
                 if frame is None:
                     if self.kind == "video":
                         break
+                    if not stalled and time.perf_counter() - last_frame > STALL_S:
+                        stalled = True                      # e.g. another app took the webcam
+                        self.state_changed.emit("stalled")
                     continue
+                last_frame = time.perf_counter()
+                if stalled:
+                    stalled = False
+                    self.state_changed.emit("running")
                 stamps.append(time.perf_counter())
                 if len(stamps) > 1:
                     self.fps = (len(stamps) - 1) / (stamps[-1] - stamps[0])

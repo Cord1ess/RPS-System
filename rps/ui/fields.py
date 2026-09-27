@@ -49,9 +49,10 @@ FIELD_INFO = {
                                     "least this share of the usual movement.", True),
     ("dvs", "still_events_per_frame"): ("Still threshold", "Movement per camera frame below which the scene counts "
                                         "as still.", True),
-    ("dvs", "flush_still_frames"): ("Still frames before sending", "", True),
-    ("dvs", "max_accumulation_s"): ("Max collection time (s)", "Discard a motion image that takes longer than this "
-                                    "to fill.", True),
+    ("dvs", "flush_still_frames"): ("Still frames before sending", "When the hand stops, wait this many still "
+                                    "camera frames before sending the partial motion image.", True),
+    ("dvs", "max_accumulation_s"): ("Max collection time (s)", "A motion image still not full after this long is "
+                                    "sent early, or dropped if it holds too little movement.", True),
     # motion model
     ("cnn", "model_path"): ("Model file", "The motion model file (.pth).", False),
     ("cnn", "threads"): ("CPU threads", "1 is fastest for this small model.", True),
@@ -107,11 +108,12 @@ FIELD_INFO = {
                                         "player's tempo is learned.", True),
     ("decision", "shoot_window_s"): ("Throw window (s)", "Minimum time allowed for the throw; grows with a slow "
                                      "tempo.", True),
-    ("decision", "rock_min_shoot_s"): ("Rock earliest (s)", "", True),
     ("decision", "rock_settle_fallback_s"): ("Rock fallback (s)", "Decide rock after this long if the landing was "
                                              "not seen.", True),
-    ("decision", "hold_min_s"): ("Hold at least (s)", "The robot keeps its move at least this long.", True),
-    ("decision", "hold_max_s"): ("Hold at most (s)", "", True),
+    ("decision", "hold_min_s"): ("Pause after result (s)", "Movement right after a result is ignored for this "
+                                 "long. The robot keeps its move until your next pump.", True),
+    ("decision", "hold_max_s"): ("Hold at most (s)", "The robot returns to ready this long after a result if no "
+                                 "new round starts.", True),
     ("decision", "correction_s"): ("Correction window (s)", "The tracker may correct a decision this long after it. "
                                    "0 = off.", True),
     # robot
@@ -120,7 +122,8 @@ FIELD_INFO = {
                         False),
     ("robot", "port"): ("Robot port", "UDP port. Must match the firmware (4210).", False),
     ("robot", "heartbeat_s"): ("Resend every (s)", "The current move is resent this often.", True),
-    ("robot", "ack_timeout_s"): ("Reply timeout (s)", "", True),
+    ("robot", "ack_timeout_s"): ("Reply timeout (s)", "Replies later than this are left out of the robot "
+                                 "reply time.", True),
     # timing model
     ("latency", "camera_latency_ms"): ("Camera delay (ms)", "Measured with the camera delay test on the Setup "
                                        "page.", True),

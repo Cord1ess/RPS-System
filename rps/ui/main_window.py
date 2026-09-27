@@ -27,7 +27,8 @@ class MainWindow(QMainWindow):
     def __init__(self, state: AppState, start_kind: str = "camera"):
         super().__init__()
         self.state = state
-        self.default_kind = start_kind
+        self.default_kind, self.default_video = start_kind, None
+        self.camera_blocked = False          # a Setup tool (auto-configure, delay test) owns the webcam
         self.setWindowTitle("Rock-Paper-Scissors robot")
         self.resize(1440, 900)
         self.worker = CameraWorker(state)
@@ -53,12 +54,16 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ camera ownership
     def start_camera(self, kind: str = None, video: str = None):
+        """Starts the camera. Without arguments, reopens the source last chosen on Setup."""
         if self.worker.isRunning():
             return
-        self.worker.kind = kind or self.default_kind
-        self.worker.video_path = video
+        if self.camera_blocked:
+            self._show_on_views("The camera is in use by a Setup tool. It restarts when the tool finishes.")
+            return
+        if kind is not None:
+            self.default_kind, self.default_video = kind, video
         self._show_on_views("Starting camera...")
-        self.worker.start()
+        self.worker.begin(self.default_kind, self.default_video)
 
     def _show_on_views(self, message: str):
         for page in self.pages:
@@ -69,6 +74,9 @@ class MainWindow(QMainWindow):
     def stop_camera(self):
         if self.worker.isRunning():
             self.worker.stop()
+
+    def current_page(self):
+        return self._current
 
     def lock_tabs(self, locked: bool, owner):
         """Keeps the user on `owner` (e.g. while recording) so the camera cannot be pulled away."""
@@ -92,7 +100,9 @@ class MainWindow(QMainWindow):
             self._current.on_frame(payload)
 
     def _on_camera_state(self, s: str):
-        if s == "stopped":
+        if s == "stalled":
+            self.statusBar().showMessage("The camera stopped sending images. Close other apps using it.", 8000)
+        elif s == "stopped":
             self._show_on_views("Camera off")
         elif s.startswith("error"):
             self._show_on_views("Camera could not be opened. Close other apps using it, then try again.")
@@ -105,4 +115,5 @@ class MainWindow(QMainWindow):
         for page in self.pages:
             page.shutdown()
         self.worker.stop()
+        self.state.cleanup()
         super().closeEvent(event)

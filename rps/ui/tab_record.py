@@ -5,6 +5,7 @@ import time
 from collections import Counter
 
 import cv2
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                                QMessageBox, QProgressBar, QScrollArea, QSpinBox, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
@@ -28,20 +29,23 @@ DEFAULT_DURATION = {"show": 45.0, "throws": 45.0, "background": 45.0}
 class RecordTab(Tab):
     title = "2  Record"
     uses_camera = True
+    record_done = Signal(object)      # (meta | "aborted" | "camera" | None, error) -> UI thread
 
     def __init__(self, main):
         super().__init__(main)
         self.view = VideoView(placeholder="Camera off")
         tip(self.view, "Live camera. Only the green square plus a small margin is saved, as lossless video.")
+        self._lock = threading.Lock()  # guards _pending/_active between the UI and camera threads
         self._pending = None          # recorder waiting for its countdown (set by UI, consumed by camera thread)
         self._countdown_until = 0.0
         self.countdown_s = 3.0
         self._active = None           # recorder currently recording (camera thread)
         self._stop_flag = False
         self._abort_flag = False
-        self._finished = None         # (meta or None, error) handed back to the UI thread
         self._message_until = 0.0
         self._dvs = PseudoDVS(self.state.cfg.dvs)
+        self.record_done.connect(self._record_done)
+        main.worker.state_changed.connect(self._camera_state)
 
         # --- session
         what = Card("Session", "Who is recording and what.")
@@ -121,6 +125,7 @@ class RecordTab(Tab):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setMinimumHeight(120)
+        tip(self.table, "This person's recordings.")
         prog.body.addWidget(self.table)
 
         panel = QWidget()
@@ -214,6 +219,10 @@ class RecordTab(Tab):
             return
         if not self.main.worker.isRunning():
             self.main.start_camera()
+            if not self.main.worker.isRunning():     # a Setup tool is using the camera
+                QMessageBox.information(self, "Camera busy", "The camera is in use by a Setup tool. Record when "
+                                        "it has finished.")
+                return
         self._stop_flag = self._abort_flag = False
         self._countdown_until = time.perf_counter() + self.countdown_s
         self._dvs = PseudoDVS(self.state.cfg.dvs)
@@ -223,20 +232,38 @@ class RecordTab(Tab):
     def _finish_async(self, rec):
         def work():
             try:
-                self._finished = (rec.finish(), None)
+                result = (rec.finish(), None)
             except Exception as e:  # disk full, codec failure...
-                self._finished = (None, str(e))
+                result = (None, str(e))
+            self.record_done.emit(result)
         threading.Thread(target=work, name="finish", daemon=True).start()
+
+    def _camera_state(self, s: str):
+        """The camera stopped, stalled or failed: end the recording instead of waiting for frames."""
+        if s == "running":
+            return
+        with self._lock:
+            pending, active = self._pending, self._active
+            self._pending = self._active = None
+        if pending is not None:
+            pending.abort()
+            self.record_done.emit(("camera", None))
+        if active is not None:
+            self._finish_async(active)               # keep what was recorded
 
     # ------------------------------------------------------------------ camera thread
     def processor(self, frame, src) -> dict:
+        with self._lock:
+            return self._process_locked(frame, src)
+
+    def _process_locked(self, frame, src) -> dict:
         now = time.perf_counter()
         state, rec = "idle", None
         if self._abort_flag and (self._pending or self._active):
             (self._active or self._pending).abort()
             self._pending = self._active = None
             self._abort_flag = False
-            self._finished = ("aborted", None)
+            self.record_done.emit(("aborted", None))
         if self._pending is not None:
             rec, state = self._pending, "countdown"
             if now >= self._countdown_until:
@@ -282,28 +309,29 @@ class RecordTab(Tab):
         elif st == "countdown":
             self.status.setText("Starting...")
             self.progress.setValue(0)
-        elif st == "idle" and self._finished is None and self.start_btn.isEnabled() \
-                and time.perf_counter() > self._message_until:
+        elif st == "idle" and self.start_btn.isEnabled() and time.perf_counter() > self._message_until:
             text = f"Ready · camera {p.get('fps', 0):.0f} fps"
             if text != self.status.text():
                 self.status.setText(text)
-        if self._finished is not None:
-            meta, err = self._finished
-            self._finished = None
-            self._message_until = time.perf_counter() + 8.0   # keep the result visible
-            self._set_recording_ui(False)
-            self.progress.setValue(100 if isinstance(meta, dict) else 0)
-            if err:
-                QMessageBox.critical(self, "Recording failed", err)
-            elif meta == "aborted":
-                self.status.setText("Discarded")
-            elif meta is None:
-                self.status.setText("Nothing recorded")
-            else:
-                check = "file check OK" if meta["video_check_ok"] else "file problem, record again"
-                self.status.setText(f"Saved {meta['frames']} frames · {meta['fps_measured']:.0f} fps · "
-                                    f"{meta['size_mb']} MB · {check}")
-            self._reload_people()
+
+    def _record_done(self, result):
+        meta, err = result
+        self._message_until = time.perf_counter() + 8.0   # keep the result visible
+        self._set_recording_ui(False)
+        self.progress.setValue(100 if isinstance(meta, dict) else 0)
+        if err:
+            QMessageBox.critical(self, "Recording failed", err)
+        elif meta == "aborted":
+            self.status.setText("Discarded")
+        elif meta == "camera":
+            self.status.setText("The camera stopped before recording began. Nothing was saved.")
+        elif meta is None:
+            self.status.setText("Nothing recorded")
+        else:
+            check = "file check OK" if meta["video_check_ok"] else "file problem, record again"
+            self.status.setText(f"Saved {meta['frames']} frames · {meta['fps_measured']:.0f} fps · "
+                                f"{meta['size_mb']} MB · {check}")
+        self._reload_people()
 
     def on_activated(self):
         self._reload_people()

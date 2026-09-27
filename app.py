@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 
 from PySide6.QtWidgets import QApplication
@@ -25,16 +26,23 @@ from rps.ui.style import apply_theme
 
 def main():
     parser = argparse.ArgumentParser(description="RPS v3 desktop control centre")
-    parser.add_argument("--config", default="config.json")
-    parser.add_argument("--data-root", default="data", help="Folder holding recordings/ and frames/")
+    parser.add_argument("--config", default=None, help="Default: config.json in the project folder")
+    parser.add_argument("--data-root", default=None, help="Folder holding recordings/ and frames/ "
+                                                          "(default: data in the project folder)")
     parser.add_argument("--mock", action="store_true", help="Use the synthetic camera by default")
     args = parser.parse_args()
+
+    # Paths given on the command line are relative to where the app was started; everything else
+    # (models/, config.json, data/, the background jobs) is relative to the project folder.
+    config = os.path.abspath(args.config) if args.config else "config.json"
+    data_root = os.path.abspath(args.data_root) if args.data_root else "data"
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
     boost_process()
     app = QApplication(sys.argv)
     app.setApplicationName("RPS v3")
     apply_theme(app)
-    window = MainWindow(AppState(args.config, args.data_root), start_kind="mock" if args.mock else "camera")
+    window = MainWindow(AppState(config, data_root), start_kind="mock" if args.mock else "camera")
     if args.mock:
         window.pages[0].source.setCurrentIndex(1)
     window.show()

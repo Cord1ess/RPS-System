@@ -21,13 +21,13 @@ from model import CLASS_NAMES
 from rps.decision import GESTURE_NAME
 from rps.hud import draw_hand, draw_roi
 from rps.pipeline import Pipeline, load_models
-from rps.robot_link import MockEsp, RobotLink
+from rps.robot_link import ESP_RST_BROWNOUT, MockEsp, RobotLink
 from rps.timing import LatencyLog
 from rps.ui.base import Tab
 from rps.ui.common import ConfigForm, LogView, ProcessRunner, VideoView, select_data, to_pixmap
 from rps.ui.fields import CHOICES
 from rps.ui.style import (BORDER, GESTURE_COLOR, MUTED, PANEL, Card, Chip, Collapsible, button, caption, label,
-                          page_header, set_kind, tip)
+                          page_header, set_kind, static_plot, tip)
 
 CLASS_SHORT = [c.split("_", 1)[1] for c in CLASS_NAMES]
 BAR_NAMES = ["Rock", "Paper", "Scissors", "None"]
@@ -111,6 +111,8 @@ class PlayTab(Tab):
         self._last_cnn_t = None
         self._cnn_times = deque(maxlen=60)
         self._last_ui = self._last_plot = 0.0
+        self._y_max = 60.0
+        self._closing = False
         self._prev_frame_t = None
         self._probs = None
         self.runner = ProcessRunner(self)
@@ -118,6 +120,7 @@ class PlayTab(Tab):
         self.runner.line.connect(self.log.log)
         self.runner.finished.connect(self._import_done)
         self.models_ready.connect(self._models_loaded)
+        main.worker.state_changed.connect(self._camera_state)
 
         # ---------------- left column: status bar, camera, delay graph, health
         bar = QFrame()
@@ -138,7 +141,7 @@ class PlayTab(Tab):
         self.view.setToolTip("Live camera. The green square is the play zone; only it is analysed. Blue dots are "
                              "finger points from the hand tracker.")
 
-        self.plot = pg.PlotWidget()
+        self.plot = static_plot(pg.PlotWidget())
         self.plot.setBackground(PANEL)
         self.plot.setFixedHeight(130)
         self.plot.setToolTip("Delay per camera frame over the last 5 seconds. Processing: time from a camera "
@@ -203,7 +206,9 @@ class PlayTab(Tab):
         g.addWidget(label("Motion model", self.model.toolTip()), 2, 0)
         g.addLayout(mrow, 2, 1)
         self.robot_on = tip(QCheckBox("Send moves to robot"), "Send each decision to the robot hand over Wi-Fi.")
-        self.robot_on.setChecked(True)
+        self.robot_on.setChecked(self.state.cfg.robot.enabled)
+        self.robot_on.toggled.connect(lambda on: (setattr(self.state.cfg.robot, "enabled", bool(on)),
+                                                  self.state.mark_dirty()))
         self.mock_esp = tip(QCheckBox("Simulated robot"), "Use a simulated robot on this computer instead of the "
                                                           "real hand (for testing without hardware).")
         cb = QHBoxLayout()
@@ -385,10 +390,8 @@ class PlayTab(Tab):
         select_data(self.detector, "cnn")
         select_data(self.mode, "continuous")
         cfg = self.state.cfg
-        if cfg.cnn.rotate == 0 and not cfg.cnn.flip:
-            cfg.cnn.rotate = 90
-            self.state.config_changed.emit()
-            self.log.log("Motion image rotated 90 degrees to match Dextra's side view.")
+        self.log.log(f"Motion image turned {cfg.cnn.rotate} degrees, mirrored: {'yes' if cfg.cnn.flip else 'no'}. "
+                     "The Dextra model check on the Evaluate page finds the best setting for this camera.")
         self._toggle()
 
     # ------------------------------------------------------------------ start / stop
@@ -436,6 +439,12 @@ class PlayTab(Tab):
             self.start_btn.setText("Start")
             self._update_enabled()
             QMessageBox.warning(self, "Cannot start", error)
+            return
+        if self._closing or self.main.current_page() is not self:   # the user left while the models loaded
+            if hand is not None:
+                hand.close()
+            self.start_btn.setText("Start")
+            self._update_enabled()
             return
         self.cnn, self.hand = cnn, hand
         for m in messages:
@@ -595,8 +604,16 @@ class PlayTab(Tab):
 
         if now - self._last_plot >= PLOT_PERIOD_S:
             self._last_plot = now
+            top = 0.0
             for key, curve in self.curves.items():
-                curve.setData(np.asarray(self.series[key], dtype=float), connect="finite")
+                data = np.asarray(self.series[key], dtype=float)
+                curve.setData(data, connect="finite")
+                if np.isfinite(data).any():
+                    top = max(top, float(np.nanmax(data)))
+            y_max = max(60.0, 1.15 * top)            # grow for spikes instead of cutting them off
+            if abs(y_max - self._y_max) > 1.0:
+                self._y_max = y_max
+                self.plot.setYRange(0, y_max, padding=0)
         if now - self._last_ui < UI_PERIOD_S:
             return
         self._last_ui = now
@@ -642,6 +659,11 @@ class PlayTab(Tab):
         link = p.get("link")
         if link is None:
             self.chip_robot.set("Robot off", "off")
+        elif link["reboots"]:
+            self.chip_robot.set(f"Robot restarted {link['reboots']}x", "bad")
+            self.chip_robot.setToolTip("The robot restarted during play"
+                                       + (" because its power dipped: give the servos their own supply."
+                                          if link["last_reset_reason"] == ESP_RST_BROWNOUT else "."))
         elif link["connected"]:
             name = "Simulated robot" if self.mock else "Robot"
             self.chip_robot.set(f"{name} {link['rtt_median_ms'] or 0:.1f} ms", "ok")
@@ -649,10 +671,20 @@ class PlayTab(Tab):
             self.chip_robot.set("Robot not replying", "bad")
 
     def on_deactivated(self):
+        # Nothing processes frames while another page is open, so the robot must not keep repeating its
+        # last move (and a second connection, e.g. Setup's connection test, must not fight this one).
         if self.pipeline is not None:
-            self.log.log("Paused while another page is open.")
+            self._stop()
+            self.log.log("Stopped because another page was opened; the robot went to ready.")
+
+    def _camera_state(self, s: str):
+        self._prev_frame_t = None                    # a restarted camera starts a new frame clock
+        if self.pipeline is not None and s != "running":
+            self._stop()
+            self.log.log("Stopped: the camera stopped sending images. The robot went to ready.")
 
     def shutdown(self):
+        self._closing = True
         if self.pipeline is not None:
             self._stop()
         self.runner.kill()

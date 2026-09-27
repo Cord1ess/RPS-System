@@ -25,7 +25,7 @@ import time
 
 import cv2
 
-from rps.camera import CameraSource, MockSource
+from rps.camera import CameraSource, MockSource, crop_roi
 from rps.config import load_config
 from rps.dvs_emulator import PseudoDVS
 from rps.hud import draw_dvs_preview
@@ -77,7 +77,7 @@ def main():
                     started = True
                 if not rec.add(frame):
                     break
-            dvs_frame, _ = dvs.process(rec.roi_crop(frame) if started else frame.bgr, frame.t)
+            dvs_frame, _ = dvs.process(crop_roi(frame.bgr, cam.roi), frame.t)   # the play zone only, as live
             if not show:
                 continue
             display = frame.bgr.copy()

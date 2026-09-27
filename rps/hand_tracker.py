@@ -6,7 +6,7 @@ measured from 3D `hand_world_landmarks` joint angles, so fingers pointing at the
 read correctly. Each finger has a two-threshold hysteresis so it cannot flicker at the boundary.
 
 Rules (index, middle, ring, pinky; thumb ignored because it is ambiguous in all three symbols):
-    scissors = index + middle extended, ring + pinky curled
+    scissors = index + middle extended (or the middle hidden behind the index), ring + pinky curled
     paper    = at least 3 of 4 extended
     rock     = at most 1 extended
     else     = unknown (-1)
@@ -28,6 +28,11 @@ ROCK, PAPER, SCISSORS, BACKGROUND, UNKNOWN = 0, 1, 2, 3, -1
 # (wrist, MCP, PIP, DIP, TIP) for index, middle, ring, pinky
 FINGER_CHAINS = [(0, 5, 6, 7, 8), (0, 9, 10, 11, 12), (0, 13, 14, 15, 16), (0, 17, 18, 19, 20)]
 MAX_FLEXION_RAD = np.deg2rad(270.0)   # ~90 deg MCP + ~100 deg PIP + ~80 deg DIP
+# Sideways scissors hide the middle finger behind the index, and the tracker then guesses it as
+# slightly bent (measured ~0.5). A fist never has a straight index, so index straight + ring and
+# pinky bent + middle only this bent is still scissors (held scissors 93% -> 98% correct per frame).
+SCISSORS_HIDDEN_MIDDLE_MAX = 0.55
+HAND_RULES_VERSION = 2      # bump whenever the rules change, so cached hand-tracker labels are redone
 
 
 @dataclass
@@ -74,7 +79,7 @@ def classify_curls(curls: Sequence[float], prev_extended: Optional[List[bool]],
             extended.append(prev_extended[i] if prev_extended is not None else c < mid)
     idx, mid_f, ring, pinky = extended
     n_ext = sum(extended)
-    if idx and mid_f and not ring and not pinky:
+    if idx and not ring and not pinky and (mid_f or curls[1] < SCISSORS_HIDDEN_MIDDLE_MAX):
         gesture = SCISSORS
     elif n_ext >= 3:
         gesture = PAPER

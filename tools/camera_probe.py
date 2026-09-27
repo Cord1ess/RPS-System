@@ -130,8 +130,7 @@ def main():
         best = max((r for r in rows if r[3]["brightness"] >= MIN_BRIGHTNESS), key=lambda r: r[3]["fps"],
                    default=max(rows, key=lambda r: r[3]["fps"]) if rows else None)
     if best is None:
-        print("\n[!] Camera could not be opened on any backend.")
-        return
+        raise SystemExit("\n[!] Camera could not be opened on any backend. Nothing was saved.")
 
     backend, locked, exp, m = best
     print("\n" + "-" * 86)

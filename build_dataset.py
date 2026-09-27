@@ -32,6 +32,7 @@ import json
 import os
 import time
 from collections import Counter, defaultdict
+from dataclasses import asdict
 from typing import Dict, List
 
 import numpy as np
@@ -40,9 +41,11 @@ from model import CLASS_NAMES, SYMBOL_TO_LABEL
 from rps.camera import VideoFileSource, crop_roi
 from rps.config import load_config
 from rps.dvs_emulator import PseudoDVS
+from rps.hand_tracker import HAND_RULES_VERSION
 from rps.perf import boost_process
 
 EXCLUDE = -1
+MIN_HAND_VISIBLE = 0.6      # warn when the hand tracker finds the hand in fewer frames than this
 
 
 def find_recordings(root: str) -> List[str]:
@@ -50,9 +53,9 @@ def find_recordings(root: str) -> List[str]:
 
 
 def mp_fingerprint(hand_cfg) -> str:
+    """Changes whenever the cached hand-tracker readings could differ: model file, settings, rules."""
     size = os.path.getsize(hand_cfg.model_path) if os.path.exists(hand_cfg.model_path) else 0
-    key = f"{size}|{hand_cfg.extend_threshold}|{hand_cfg.curl_threshold}|{hand_cfg.crop_margin}|" \
-          f"{hand_cfg.min_detection_confidence}|{hand_cfg.min_tracking_confidence}"
+    key = f"{size}|{json.dumps(asdict(hand_cfg), sort_keys=True)}|{HAND_RULES_VERSION}"
     return hashlib.md5(key.encode()).hexdigest()[:12]
 
 
@@ -181,19 +184,31 @@ def main():
     index = {"created": time.strftime("%Y-%m-%d %H:%M:%S"), "dvs": cfg.to_dict()["dvs"],
              "event_counts": event_counts, "frame_skips": skips, "files": []}
     totals = defaultdict(Counter)
+    warnings = []
     t0 = time.time()
     for r_i, rec_dir in enumerate(recordings):
         with open(os.path.join(rec_dir, "meta.json"), "r", encoding="utf-8") as f:
             meta = json.load(f)
+        name = f"{meta['person']}/{meta['session_id']}"
+        if args.no_mp and meta["type"] == "throws":
+            # Without the hand tracker the pumping fists would all be labelled with the thrown gesture.
+            warnings.append(f"{name}: skipped; countdown throws need the hand tracker to tell pumps from the throw")
+            continue
         src = VideoFileSource(rec_dir)
         times = np.array(src.times, np.float64)
         src.stop()
         mp = None
         if not args.no_mp and meta["type"] in ("show", "throws"):
             mp = mediapipe_track(rec_dir, cfg.hand)
+            seen = float(np.mean(mp["present"])) if len(mp["present"]) else 0.0
+            if seen < MIN_HAND_VISIBLE:
+                warnings.append(f"{name}: the hand was found in only {seen:.0%} of frames (bad light or framing); "
+                                f"most of this session is left out")
         labels = frame_labels(meta, times, mp, args.clean_conf, args.lookahead)
         excluded = int((labels == EXCLUDE).sum())
-        print(f"[build] ({r_i + 1}/{len(recordings)}) {meta['person']}/{meta['session_id']}: "
+        if len(times) and excluded > 0.5 * len(times):
+            warnings.append(f"{name}: {excluded} of {len(times)} frames left out by the label check")
+        print(f"[build] ({r_i + 1}/{len(recordings)}) {name}: "
               f"{len(times)} webcam frames, {excluded} excluded by labelling")
 
         person_dir = os.path.join(args.out, meta["person"])
@@ -226,6 +241,8 @@ def main():
     for person, counts in sorted(totals.items()):
         row = "  ".join(f"{CLASS_NAMES[c]}={counts.get(c, 0)}" for c in range(4))
         print(f"  {person:12s} {row}")
+    for w in warnings:
+        print(f"[build] WARNING: {w}")
 
 
 if __name__ == "__main__":
