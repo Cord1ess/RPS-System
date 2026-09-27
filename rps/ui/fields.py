@@ -119,12 +119,17 @@ FIELD_INFO = {
                                    "0 = off.", True),
     # robot
     ("robot", "enabled"): ("Robot link", "Send moves to the robot hand.", True),
-    ("robot", "host"): ("Robot address", "IP address of the ESP32. Its own Wi-Fi (RPS-HAND) uses 192.168.4.1.",
-                        False),
+    ("robot", "protocol"): ("Robot commands", "Must match the robot's firmware. Team firmware: sends RPS:ROCK, "
+                            "RPS:PAPER or RPS:SCISSORS once when the robot's move changes; it has no ready "
+                            "position and does not reply. Reference firmware: numbered messages with replies.",
+                            False),
+    ("robot", "host"): ("Robot address", "IP address of the ESP32 (team robot: 192.168.0.126; the reference "
+                        "firmware's own Wi-Fi: 192.168.4.1).", False),
     ("robot", "port"): ("Robot port", "UDP port. Must match the firmware (4210).", False),
-    ("robot", "heartbeat_s"): ("Resend every (s)", "The current move is resent this often.", True),
-    ("robot", "ack_timeout_s"): ("Reply timeout (s)", "Replies later than this are left out of the robot "
-                                 "reply time.", True),
+    ("robot", "heartbeat_s"): ("Resend every (s)", "Reference firmware only: the current move is resent this "
+                               "often.", True),
+    ("robot", "ack_timeout_s"): ("Reply timeout (s)", "Reference firmware only: replies later than this are left "
+                                 "out of the robot reply time.", True),
     # timing model
     ("latency", "camera_latency_ms"): ("Camera delay (ms)", "Measured with the camera delay test on the Setup "
                                        "page.", True),
@@ -142,6 +147,8 @@ CHOICES = {
     ("decision", "idle_action"): [("ready", "Return to ready"), ("hold", "Keep last move")],
     ("decision", "pump_source"): [("flow", "Movement in play zone"), ("mp", "Tracked wrist")],
     ("cnn", "rotate"): [(0, "0°"), (90, "90°"), (180, "180°"), (270, "270°")],
+    ("robot", "protocol"): [("rps_text", "Team firmware (RPS:ROCK, RPS:PAPER, RPS:SCISSORS)"),
+                            ("ack", "Reference firmware (numbered, with replies)")],
 }
 
 SECTION_INFO = {

@@ -78,10 +78,12 @@ class SetupTab(Tab):
         zone.body.addLayout(row(self.roi_btn, self.zone_label))
 
         # --- robot
-        robot = Card("Robot hand", "Connection to the ESP32. Join its Wi-Fi (RPS-HAND) from this laptop first.")
-        robot.body.addWidget(ConfigForm(self.state, "robot", keys=["host", "port"]))
+        robot = Card("Robot hand", "Connection to the ESP32. The laptop must be on the same network as the robot.")
+        robot.body.addWidget(ConfigForm(self.state, "robot", keys=["protocol", "host", "port"]))
         self.mock_chk = tip(QCheckBox("Simulated robot"), "Test against a simulated robot on this computer.")
-        test = button("Test connection", tooltip="Send a message to the robot and wait 1.5 s for its reply.")
+        test = button("Test connection", tooltip="Team firmware: sends RPS:PAPER once, so the hand should open "
+                                                 "(it cannot reply). Reference firmware: sends a message and "
+                                                 "waits 1.5 s for its reply.")
         test.clicked.connect(self._test_link)
         self.chip_link = Chip("Not tested", "off", "Result of the last connection test.")
         robot.body.addLayout(row(test, self.mock_chk, self.chip_link))
@@ -231,6 +233,11 @@ class SetupTab(Tab):
         self._run_tool("probe", ["tools/camera_probe.py", "--write-config", "--config", self.state.config_path])
 
     def _latency(self, mode: str):
+        if mode == "led" and self.state.cfg.robot.protocol != "ack":
+            self.output.toggle.setChecked(True)
+            self.log.log("The LED test needs the reference firmware; the team firmware has no LED command. "
+                         "Use the mirror test.")
+            return
         self._run_tool("latency", ["tools/latency_test.py", "--mode", mode, "--config", self.state.run_config()])
 
     def _tool_line(self, line: str):
@@ -265,8 +272,10 @@ class SetupTab(Tab):
                                        f"game or another simulated robot. Stop it and test again.")
                 return
             host = "127.0.0.1"
-        self._link = RobotLink(host, port, heartbeat_s=0.05).start()
-        self._link.send_pose("N")
+        cfg = self.state.cfg.robot
+        self._link = RobotLink(host, port, heartbeat_s=0.05, protocol=cfg.protocol).start()
+        # reference firmware: READY, then wait for replies; team firmware: one visible move (it cannot reply)
+        self._link.send_pose("N" if cfg.protocol == "ack" else "P")
         self.chip_link.set("Testing...", "info")
         QTimer.singleShot(1500, self._link_result)
 
@@ -275,9 +284,24 @@ class SetupTab(Tab):
         self._link.stop(send_ready=False)
         self._link = None
         simulated = self._mock is not None
+        received = self._mock.received if simulated else 0
         if self._mock is not None:
             self._mock.stop()
             self._mock = None
+        if not stats["replies"]:                   # team firmware: RPS:<GESTURE>, no replies
+            where = f"{self.state.cfg.robot.host}:{self.state.cfg.robot.port}"
+            if stats["sent"] == 0:
+                self.chip_link.set("Could not send", "bad")
+                self.link_hint.setText("Check that the laptop is on the same network as the robot.")
+            elif simulated:
+                self.chip_link.set("Simulated robot received RPS:PAPER" if received else "Simulated robot got "
+                                   "nothing", "ok" if received else "bad")
+                self.link_hint.setText("")
+            else:
+                self.chip_link.set("Sent RPS:PAPER", "info")
+                self.link_hint.setText(f"Sent to {where}. This firmware does not reply, so delivery cannot be "
+                                       f"confirmed here: check that the hand opened.")
+            return
         if stats["acked"]:
             name = "Simulated robot" if simulated else "Robot"
             rtt = stats["rtt_median_ms"]

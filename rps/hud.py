@@ -93,6 +93,8 @@ def draw_card(img: np.ndarray, snap: Snapshot, raw_cnn: Optional[str], raw_mp: O
                 (22, y0 + 78), FONT, 0.45, (200, 200, 200), 1)
     if link is None:
         link_txt, color = "ESP: disabled", (150, 150, 150)
+    elif not link.get("replies", True):
+        link_txt, color = f"ESP: {link.get('sent', 0)} RPS commands sent (no replies)", (200, 200, 200)
     elif link.get("connected"):
         link_txt, color = f"ESP: connected, rtt {link.get('rtt_median_ms') or 0:.1f} ms", (0, 255, 0)
     else:

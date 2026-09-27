@@ -53,6 +53,9 @@ def main():
     args = parser.parse_args()
     boost_process()
     cfg = load_config(args.config)
+    if args.mode == "led" and cfg.robot.protocol != "ack":
+        raise SystemExit("[latency] The LED test needs the reference firmware (robot.protocol 'ack'); the team "
+                         "firmware has no LED command. Use --mode screen.")
     cam = CameraSource(cfg.camera, cfg.roi).start()
     link = None
     white = np.full((400, 400, 3), 255, np.uint8)

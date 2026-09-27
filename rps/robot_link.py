@@ -1,14 +1,18 @@
 """
-UDP link to the ESP32 hand controller.
+UDP link to the ESP32 hand controller. The pose sent is what the ROBOT shows (R, P, S, or N =
+READY); the counter logic stays on the PC. Two firmware protocols (robot.protocol):
 
-Protocol (ASCII, one message per datagram, default port 4210):
-    PC  -> ESP  P,<seq>,<pose>,<pc_ms>        pose in {R, P, S, N}; N = READY. The pose is what
-                                              the ROBOT shows; counter logic stays on the PC.
+"rps_text" (the team's firmware), one ASCII command per datagram, no replies:
+    PC  -> ESP  RPS:ROCK | RPS:PAPER | RPS:SCISSORS
+    Sent once when the robot's move changes. The firmware has no READY command, so READY sends
+    nothing and the hand keeps its last move; there is no LED command.
+
+"ack" (firmware/esp32_rps_receiver, the reference sketch), default port 4210:
+    PC  -> ESP  P,<seq>,<pose>,<pc_ms>        pose in {R, P, S, N}
     PC  -> ESP  L,<seq>,<0|1>                 LED off/on (camera-latency test)
     ESP -> PC   A,<seq>,<esp_ms>,<reset>      acknowledgement; reset = esp_reset_reason()
-
-A new pose is sent immediately on change and re-sent every heartbeat_s (idempotent on the ESP,
-which falls back to N after 2 s of silence). Acknowledgements give the round-trip time.
+    A new pose is sent immediately on change and re-sent every heartbeat_s (idempotent on the
+    ESP, which falls back to N after 2 s of silence). Acknowledgements give the round-trip time.
 """
 
 import socket
@@ -18,7 +22,17 @@ from collections import deque
 from typing import Dict, Optional
 
 POSES = ("R", "P", "S", "N")
+PROTOCOLS = ("rps_text", "ack")
+TEXT_COMMAND = {"R": "RPS:ROCK", "P": "RPS:PAPER", "S": "RPS:SCISSORS"}   # the team firmware has no READY
 ESP_RST_BROWNOUT = 9    # esp_reset_reason(): the supply dipped (usually servos on the ESP32's own power)
+
+
+def encode_text_pose(pose: str) -> Optional[bytes]:
+    """The team firmware's command for a robot pose, or None for READY (it has no such command)."""
+    if pose not in POSES:
+        raise ValueError(f"Invalid pose '{pose}'")
+    command = TEXT_COMMAND.get(pose)
+    return command.encode("utf-8") if command else None
 
 
 def encode_pose(seq: int, pose: str, pc_ms: int) -> bytes:
@@ -38,7 +52,11 @@ def encode_ack(seq: int, esp_ms: int, reset_reason: int = 0) -> bytes:
 def parse_message(data: bytes) -> Optional[Dict]:
     """Parses any protocol message; returns None for malformed input."""
     try:
-        parts = data.decode("ascii").strip().split(",")
+        text = data.decode("ascii").strip()
+        if text.startswith("RPS:"):
+            pose = {v: k for k, v in TEXT_COMMAND.items()}.get(text)
+            return {"type": "RPS", "pose": pose} if pose else None
+        parts = text.split(",")
         kind = parts[0]
         if kind == "P" and len(parts) == 4 and parts[2] in POSES:
             return {"type": "P", "seq": int(parts[1]), "pose": parts[2], "pc_ms": int(parts[3])}
@@ -53,12 +71,17 @@ def parse_message(data: bytes) -> Optional[Dict]:
 
 
 class RobotLink:
-    def __init__(self, host: str, port: int = 4210, heartbeat_s: float = 0.1, ack_timeout_s: float = 0.5):
+    def __init__(self, host: str, port: int = 4210, heartbeat_s: float = 0.1, ack_timeout_s: float = 0.5,
+                 protocol: str = "ack"):
+        if protocol not in PROTOCOLS:
+            raise ValueError(f"Unknown robot protocol '{protocol}'")
         try:
             host = socket.gethostbyname(host)      # once: a name lookup per send would stall the decision thread
         except OSError:
             pass
         self.addr = (host, port)
+        self.protocol = protocol
+        self.replies = protocol == "ack"           # the team firmware ("rps_text") never answers
         self.heartbeat_s = heartbeat_s
         self.ack_timeout_s = ack_timeout_s
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -80,11 +103,19 @@ class RobotLink:
         self._last_esp_ms: Optional[int] = None
         self._send_error: Optional[str] = None
 
+    @classmethod
+    def from_config(cls, robot_cfg, host: Optional[str] = None) -> "RobotLink":
+        """The link described by config.robot; `host` overrides the address (e.g. a simulated robot)."""
+        return cls(host or robot_cfg.host, robot_cfg.port, robot_cfg.heartbeat_s, robot_cfg.ack_timeout_s,
+                   robot_cfg.protocol)
+
     def start(self) -> "RobotLink":
         self._running = True
         self._thread = threading.Thread(target=self._loop, name="robot_link", daemon=True)
         self._thread.start()
-        print(f"[robot_link] Sending to {self.addr[0]}:{self.addr[1]} (heartbeat {self.heartbeat_s * 1000:.0f} ms)")
+        how = (f"heartbeat {self.heartbeat_s * 1000:.0f} ms" if self.protocol == "ack"
+               else "RPS:<GESTURE> commands, sent on change, no replies")
+        print(f"[robot_link] Sending to {self.addr[0]}:{self.addr[1]} ({how})")
         return self
 
     def _now_ms(self) -> int:
@@ -93,7 +124,8 @@ class RobotLink:
     def _send(self, payload: bytes, seq: int):
         try:
             self.sock.sendto(payload, self.addr)
-            self._pending[seq] = time.perf_counter()
+            if self.replies:
+                self._pending[seq] = time.perf_counter()
             self.sent += 1
             self._send_error = None
         except OSError as e:
@@ -106,6 +138,12 @@ class RobotLink:
         with self._lock:
             self._seq += 1
             seq = self._seq
+            if self.protocol == "rps_text":
+                payload = encode_text_pose(pose)             # raises on a bad pose before anything changes
+                self._pose = pose
+                if payload is not None:                     # READY: the firmware has no command for it
+                    self._send(payload, seq)
+                return seq
             payload = encode_pose(seq, pose, self._now_ms())   # raises on a bad pose before anything changes
             self._pose = pose
             self._send(payload, seq)
@@ -113,6 +151,8 @@ class RobotLink:
         return seq
 
     def send_led(self, on: bool) -> int:
+        if self.protocol != "ack":
+            raise RuntimeError("The robot's firmware (RPS:<GESTURE> commands) has no LED command.")
         with self._lock:
             self._seq += 1
             seq = self._seq
@@ -147,6 +187,8 @@ class RobotLink:
                 # Windows raises ConnectionResetError on ICMP port-unreachable; keep going
                 pass
             now = time.perf_counter()
+            if self.protocol != "ack":
+                continue                           # the team firmware: commands only on change, no heartbeat
             with self._lock:
                 if now >= self._next_heartbeat:
                     self._seq += 1
@@ -170,11 +212,12 @@ class RobotLink:
             "rtt_p90_ms": rtt[int(len(rtt) * 0.9)] if rtt else None,
             "last_reset_reason": self.last_reset_reason,
             "reboots": self.reboots,
+            "replies": self.replies,
         }
 
     def stop(self, send_ready: bool = True):
         if send_ready and self._running:
-            self.send_pose("N")
+            self.send_pose("N")                    # "rps_text": nothing is sent; the hand keeps its move
         self._running = False
         if self._thread is not None:
             self._thread.join(timeout=0.5)
@@ -183,7 +226,10 @@ class RobotLink:
 
 
 class MockEsp:
-    """In-process ESP32 stand-in: logs pose changes and acknowledges every message."""
+    """
+    In-process ESP32 stand-in for either protocol: logs pose changes, acknowledges the reference
+    protocol's messages and, like the team firmware, stays silent on RPS:<GESTURE> commands.
+    """
 
     def __init__(self, port: int = 4210, host: str = "127.0.0.1", verbose: bool = True):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -192,6 +238,7 @@ class MockEsp:
         self.verbose = verbose
         self.pose = "N"
         self.pose_log = []
+        self.received = 0                  # valid messages of either protocol
         self._t0 = time.perf_counter()
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -211,14 +258,16 @@ class MockEsp:
             except OSError:
                 continue
             msg = parse_message(data)
-            if msg is None:
+            if msg is None or msg["type"] == "A":
                 continue
+            self.received += 1
             esp_ms = int((time.perf_counter() - self._t0) * 1000)
-            if msg["type"] == "P" and msg["pose"] != self.pose:
+            if msg["type"] in ("P", "RPS") and msg["pose"] != self.pose:
                 self.pose = msg["pose"]
                 self.pose_log.append((time.perf_counter(), self.pose))
                 if self.verbose:
-                    print(f"[mock_esp] t={esp_ms:7d} ms  seq={msg['seq']:6d}  POSE -> {self.pose}")
+                    what = data.decode("ascii").strip() if msg["type"] == "RPS" else f"seq={msg['seq']:6d}"
+                    print(f"[mock_esp] t={esp_ms:7d} ms  {what}  POSE -> {self.pose}")
             elif msg["type"] == "L" and self.verbose:
                 print(f"[mock_esp] t={esp_ms:7d} ms  LED {'ON' if msg['on'] else 'OFF'}")
             if msg["type"] in ("P", "L"):

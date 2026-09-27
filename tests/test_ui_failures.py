@@ -158,3 +158,12 @@ def test_comparison_uses_the_chosen_motion_model(qapp, window, tmp_path):
     ev.runner.start = lambda args: started.append(args)
     ev._run()
     assert "cnn.model_path=models/dextra_roshambo.pth" in started[0]
+
+
+def test_setup_connection_test_with_team_firmware(qapp, window):
+    setup = window.pages[0]
+    assert window.state.cfg.robot.protocol == "rps_text"
+    setup.mock_chk.setChecked(True)                          # simulated robot on this computer only
+    setup._test_link()
+    pump(qapp, 2.0)
+    assert setup.chip_link.text() == "Simulated robot received RPS:PAPER"

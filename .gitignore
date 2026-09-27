@@ -20,7 +20,10 @@ data/
 models/*.task
 # Dextra weights and samples: the upstream repo has no license, so do not redistribute
 models/dextra/
-models/dextra_roshambo.pth
+# Trained and tuned model files: tuned ones are built from Dextra's weights (same reason), and
+# all of them are rebuilt from data/ with train.py
+models/*.pth
+models/*_metrics.png
 
 # Per-run logs
 *.log

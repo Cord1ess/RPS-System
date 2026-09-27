@@ -166,7 +166,19 @@ python play.py --mode continuous
 
 ## ESP32 protocol
 
-ASCII over UDP, one message per datagram, port **4210**:
+Set `robot.protocol` (Setup page: "Robot commands") to match the firmware on the hand. The pose sent is always what the **robot** shows; the counter logic stays on the PC.
+
+**Team firmware (`rps_text`, default)**: address `192.168.0.126`, UDP port **4210**, one ASCII command per datagram:
+
+| Robot shows | Command |
+|---|---|
+| Rock (all fingers folded) | `RPS:ROCK` |
+| Paper (all fingers extended) | `RPS:PAPER` |
+| Scissors (index and middle extended) | `RPS:SCISSORS` |
+
+Each command is sent once, when the robot's move changes (so once per countdown round, even if the move repeats). The firmware has no ready position and does not reply: while you pump, the hand keeps its last move; Play shows how many moves were sent instead of a reply time; the LED camera-delay test is not available (use the mirror test). Setup's "Test connection" sends `RPS:PAPER` once, so the hand should open.
+
+**Reference firmware (`ack`)**: [firmware/esp32_rps_receiver](firmware/esp32_rps_receiver/esp32_rps_receiver.ino), ASCII over UDP, port **4210**:
 
 | Direction | Message | Meaning |
 |---|---|---|
@@ -174,17 +186,17 @@ ASCII over UDP, one message per datagram, port **4210**:
 | PC → ESP | `L,<seq>,<0\|1>` | LED off/on (latency test) |
 | ESP → PC | `A,<seq>,<esp_ms>,<reset_reason>` | Acknowledgement; `reset_reason` 9 = brownout (ESP_RST_BROWNOUT) |
 
-Firmware must-dos:
+Firmware must-dos (either firmware):
 - `WiFi.setSleep(false)` — modem sleep adds 100 ms or more.
 - Servos jump straight to their target, with no easing.
 - Power the servos separately, with a bulk capacitor.
-- The ESP falls back to READY after 2 s without packets.
+- Reference firmware: the ESP falls back to READY after 2 s without packets.
 - Discard the rest of any oversized packet (`udp.flush()`), or the ESP stops receiving.
 - If acknowledgements never arrive, check that Windows Firewall allows Python on that network.
 
 The Play page stops the game (robot to READY) when you leave the page or the camera stops, and warns when the robot restarts during play (a power dip, reset reason 9).
 
-`python tools/mock_esp.py` stands in for the ESP during development.
+`python tools/mock_esp.py` (or "Simulated robot" in the app) stands in for either firmware during development.
 
 ## Key settings ([config.json](config.json); override with `--set section.key=value`)
 

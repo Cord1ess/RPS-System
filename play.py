@@ -77,7 +77,7 @@ def main():
         mock_esp = MockEsp(port=cfg.robot.port).start()
         cfg.robot.host = "127.0.0.1"
     if cfg.robot.enabled and not args.no_robot:
-        link = RobotLink(cfg.robot.host, cfg.robot.port, cfg.robot.heartbeat_s, cfg.robot.ack_timeout_s).start()
+        link = RobotLink.from_config(cfg.robot).start()
 
     source = open_source(cfg.camera, cfg.roi, video=args.video, mock=args.mock_camera, realtime=True)
     pipeline = Pipeline(cfg, cnn, hand, pose_sink=link.send_pose if link else None)

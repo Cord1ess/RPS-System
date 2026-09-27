@@ -1,3 +1,4 @@
+import os
 import socket
 import time
 
@@ -5,7 +6,7 @@ import numpy as np
 import pytest
 
 from rps.robot_link import (ESP_RST_BROWNOUT, MockEsp, RobotLink, encode_ack, encode_led, encode_pose,
-                            parse_message)
+                            encode_text_pose, parse_message)
 
 
 def test_round_trip_encoding():
@@ -114,3 +115,108 @@ def test_stop_sends_ready_and_closes():
     assert parse_message(robot.recvfrom(256)[0])["pose"] == "N"
     assert link.sock.fileno() == -1
     robot.close()
+
+
+# ----------------------------------------------------------------------------- team firmware: RPS:<GESTURE>
+
+def received(sock, wait=0.3):
+    """Every datagram that arrives within `wait` seconds."""
+    out, end = [], time.perf_counter() + wait
+    sock.settimeout(0.05)
+    while time.perf_counter() < end:
+        try:
+            out.append(sock.recvfrom(256)[0])
+        except socket.timeout:
+            pass
+    return out
+
+
+def test_team_firmware_commands():
+    assert encode_text_pose("R") == b"RPS:ROCK"
+    assert encode_text_pose("P") == b"RPS:PAPER"
+    assert encode_text_pose("S") == b"RPS:SCISSORS"
+    assert encode_text_pose("N") is None                      # the firmware has no ready command
+    with pytest.raises(ValueError):
+        encode_text_pose("X")
+    assert parse_message(b"RPS:SCISSORS") == {"type": "RPS", "pose": "S"}
+    assert parse_message(b"RPS:LIZARD") is None
+
+
+def test_team_firmware_link_sends_each_move_once_and_nothing_else():
+    robot = fake_robot(42182)
+    link = RobotLink("127.0.0.1", 42182, protocol="rps_text").start()
+    try:
+        link.send_pose("R")
+        link.send_pose("N")                                   # ready: nothing to send
+        link.send_pose("S")
+        assert received(robot, 0.5) == [b"RPS:ROCK", b"RPS:SCISSORS"]    # no heartbeat repeats
+        with pytest.raises(RuntimeError):
+            link.send_led(True)
+        s = link.stats()
+        assert s["sent"] == 2 and s["replies"] is False and s["acked"] == 0
+        link.stop()                                           # no ready command on stop either
+        assert received(robot, 0.2) == []
+    finally:
+        robot.close()
+
+
+def test_real_throws_reach_the_robot_as_team_commands():
+    """The decision engine on the recorded 45 s session, wired to the link: 28 scissors throws -> 28 rocks."""
+    from rps.config import DecisionConfig, VoteConfig
+    from rps.decision import DecisionEngine, MotionObs
+    from rps.hand_tracker import HandObs
+    d = np.load(os.path.join(os.path.dirname(__file__), "fixtures", "real_throws_scissors.npz"))
+    m, h = d["motion"], d["hand"]
+    robot = fake_robot(42183)
+    link = RobotLink("127.0.0.1", 42183, protocol="rps_text").start()
+    try:
+        eng = DecisionEngine(DecisionConfig(mode="countdown"), VoteConfig(), use_cnn=False, use_mp=True)
+
+        def v(x):
+            return None if np.isnan(x) else float(x)
+
+        for i in range(len(m)):
+            t = float(m[i, 0])
+            for pose in (eng.on_motion(MotionObs(i, t, int(m[i, 1]), v(m[i, 2]), None, v(m[i, 3]))),
+                         eng.on_hand(t, HandObs(present=bool(h[i, 1]), gesture=int(h[i, 2]), confidence=float(h[i, 3]),
+                                                wrist_y=v(h[i, 4]),
+                                                box=None if np.isnan(h[i, 5]) else tuple(map(float, h[i, 5:9])),
+                                                skipped=bool(h[i, 9])), None if np.isnan(h[i, 10]) else int(h[i, 10]))):
+                if pose:
+                    link.send_pose(pose)
+        got = received(robot, 0.5)
+        assert got == [b"RPS:ROCK"] * 28                      # rock beats scissors, once per throw
+    finally:
+        link.stop()
+        robot.close()
+
+
+def test_link_follows_the_configured_protocol():
+    from rps.config import Config, apply_overrides, parse_set_args
+    cfg = Config()
+    assert cfg.robot.protocol == "rps_text" and cfg.robot.host == "192.168.0.126" and cfg.robot.port == 4210
+    with pytest.raises(ValueError):
+        apply_overrides(cfg, parse_set_args(["robot.protocol=json"]))
+    robot = fake_robot(42184)
+    cfg.robot.port = 42184
+    link = RobotLink.from_config(cfg.robot, host="127.0.0.1").start()   # never the real robot in tests
+    try:
+        link.send_pose("P")
+        assert received(robot, 0.3) == [b"RPS:PAPER"]
+    finally:
+        link.stop()
+        robot.close()
+
+
+def test_simulated_robot_understands_team_commands_and_stays_silent():
+    esp = MockEsp(port=42185, verbose=False).start()
+    link = RobotLink("127.0.0.1", 42185, protocol="rps_text").start()
+    try:
+        link.send_pose("S")
+        link.send_pose("P")
+        time.sleep(0.3)
+        assert [p for _, p in esp.pose_log] == ["S", "P"] and esp.received == 2
+        assert link.stats()["acked"] == 0                     # like the real firmware: no replies
+    finally:
+        link.stop()
+        esp.stop()

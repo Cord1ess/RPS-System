@@ -1,5 +1,6 @@
 """
-Stand-alone mock ESP32: listens on UDP, logs pose changes, acknowledges every message.
+Stand-alone mock ESP32: listens on UDP and logs pose changes. Understands both firmware protocols:
+RPS:<GESTURE> commands (no reply, like the team firmware) and the reference P/L messages (acknowledged).
 
 Usage (in one terminal):   python tools/mock_esp.py
 Then (in another):         python play.py --set robot.host=127.0.0.1

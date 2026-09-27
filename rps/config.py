@@ -116,10 +116,11 @@ class DecisionConfig:
 @dataclass
 class RobotConfig:
     enabled: bool = True
-    host: str = "192.168.4.1"       # ESP32 soft-AP default address
+    protocol: str = "rps_text"      # "rps_text": team firmware (RPS:ROCK ...) | "ack": firmware/esp32_rps_receiver
+    host: str = "192.168.0.126"     # the team ESP32 on the local network (reference sketch soft-AP: 192.168.4.1)
     port: int = 4210
-    heartbeat_s: float = 0.10
-    ack_timeout_s: float = 0.5
+    heartbeat_s: float = 0.10       # "ack" only: resend period (its firmware falls back to READY after 2 s)
+    ack_timeout_s: float = 0.5      # "ack" only
 
 
 @dataclass
@@ -158,6 +159,7 @@ ALLOWED: Dict[tuple, tuple] = {
     ("decision", "source"): ("fused", "cnn", "mediapipe"),
     ("decision", "idle_action"): ("ready", "hold"),
     ("decision", "pump_source"): ("flow", "mp"),
+    ("robot", "protocol"): ("rps_text", "ack"),
 }
 
 # Keys that older config.json files may still contain; they are skipped instead of rejected.

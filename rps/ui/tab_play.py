@@ -505,7 +505,7 @@ class PlayTab(Tab):
                     host = "127.0.0.1"
                 except OSError as e:
                     self.log.log(f"Simulated robot could not start: {e}")
-            self.link = RobotLink(host, cfg.robot.port, cfg.robot.heartbeat_s, cfg.robot.ack_timeout_s).start()
+            self.link = RobotLink.from_config(cfg.robot, host=host).start()
         self.latency = LatencyLog()
         self._rebuild = False
         self.pipeline = self._make_pipeline()
@@ -754,6 +754,14 @@ class PlayTab(Tab):
         link = p.get("link")
         if link is None:
             self.chip_robot.set("Robot off", "off")
+        elif not link["replies"]:                    # team firmware: RPS:<GESTURE>, cannot reply
+            if self.mock is not None:
+                self.chip_robot.set(f"Simulated robot received {self.mock.received}", "ok")
+            else:
+                self.chip_robot.set(f"Robot: {link['sent']} moves sent", "info")
+            self.chip_robot.setToolTip("Moves are sent as RPS:ROCK, RPS:PAPER or RPS:SCISSORS when the robot's move "
+                                       "changes. This firmware does not reply, so delivery and reply time cannot "
+                                       "be shown; it has no ready position, so the hand keeps its last move.")
         elif link["reboots"]:
             self.chip_robot.set(f"Robot restarted {link['reboots']}x", "bad")
             self.chip_robot.setToolTip("The robot restarted during play"
