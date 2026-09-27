@@ -19,7 +19,6 @@ Usage:
 """
 
 import argparse
-import glob
 import json
 import os
 import time
@@ -113,7 +112,7 @@ def train_fold(train_x, train_y, val_x, val_y, args, tag: str):
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
     print(f"[train:{tag}] train {len(train_y)} frames {dict(sorted(Counter(train_y.tolist()).items()))} | "
-          f"val {len(val_y)} | class weights {np.round(weights.numpy(), 2).tolist()}")
+          f"val {len(val_y) if val_y is not None else 0} | class weights {np.round(weights.numpy(), 2).tolist()}")
 
     history = {"train_loss": [], "train_acc": [], "val_bal_acc": []}
     best_state, best_bal = None, -1.0

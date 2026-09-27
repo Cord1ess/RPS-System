@@ -32,6 +32,7 @@ class Frame:
     id: int
     t: float            # capture time in seconds (perf_counter for live, recorded for replay)
     bgr: np.ndarray
+    live: bool = False  # True when t is on the perf_counter clock (webcam), so latencies can be measured
 
 
 def clamp_roi(roi: Roi, width: int, height: int) -> Roi:
@@ -148,7 +149,7 @@ class CameraSource:
             if self.cfg.mirror:
                 img = cv2.flip(img, 1)
             with self._cond:
-                self._latest = Frame(frame_id, t, img)
+                self._latest = Frame(frame_id, t, img, live=True)
                 self._cond.notify_all()
             frame_id += 1
 

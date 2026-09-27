@@ -13,9 +13,7 @@ Keys: q/ESC quit | m toggle continuous/countdown | r reset counters
 """
 
 import argparse
-import os
 import sys
-import time
 
 import cv2
 
@@ -24,7 +22,7 @@ from rps.config import load_config
 from rps.hud import draw_banner, draw_card, draw_dvs_preview, draw_hand, draw_roi
 from rps.decision import GESTURE_NAME
 from rps.perf import boost_process
-from rps.pipeline import Pipeline
+from rps.pipeline import Pipeline, load_models
 from rps.robot_link import MockEsp, RobotLink
 from rps.timing import LatencyLog
 
@@ -33,27 +31,12 @@ WINDOW = "RPS v3 - pseudo-DVS + MediaPipe"
 
 def build_models(cfg, source_mode):
     """Loads the CNN and/or MediaPipe according to --source, degrading gracefully."""
-    cnn = hand = None
-    if source_mode in ("fused", "cnn"):
-        if os.path.exists(cfg.cnn.model_path):
-            from rps.cnn import GestureCNN
-            cnn = GestureCNN(cfg.cnn.model_path, cfg.cnn.threads)
-            for warning in cnn.check_dvs(cfg.dvs):
-                print(f"[play] WARNING: {warning}")
-        elif source_mode == "cnn":
-            sys.exit(f"[play] CNN model '{cfg.cnn.model_path}' not found. Train one with train.py.")
-        else:
-            print(f"[play] CNN model '{cfg.cnn.model_path}' not found -> running MediaPipe-only.")
-    if source_mode in ("fused", "mediapipe") and cfg.hand.enabled:
-        try:
-            from rps.hand_tracker import HandTracker
-            hand = HandTracker(cfg.hand)
-        except Exception as e:  # MediaPipe missing or model file absent
-            if source_mode == "mediapipe":
-                sys.exit(f"[play] MediaPipe unavailable: {e}")
-            print(f"[play] MediaPipe unavailable ({e}) -> running CNN-only.")
-    if cnn is None and hand is None:
-        sys.exit("[play] Neither the CNN nor MediaPipe is available.")
+    try:
+        cnn, hand, messages = load_models(cfg, source_mode)
+    except RuntimeError as e:
+        sys.exit(f"[play] {e}")
+    for msg in messages:
+        print(f"[play] {msg}")
     return cnn, hand
 
 

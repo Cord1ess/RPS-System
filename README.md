@@ -56,10 +56,32 @@ uv venv --python 3.12 .venv
 .venv\Scripts\activate
 uv pip install -r requirements.txt
 curl -L -o models/hand_landmarker.task https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task
-pytest tests/                       # 32 tests
+pytest tests/                       # 35 tests (incl. an offscreen UI test)
 ```
 
-## Workflow
+## Desktop app (recommended)
+
+```powershell
+python app.py            # or: python app.py --mock   (synthetic camera, no webcam)
+```
+
+One window covers the whole workflow. Visible text is kept short and numeric; hover any control, reading or column title for what it does.
+
+| Page | What you do there |
+|---|---|
+| **1 Setup** | Start the camera and check frame rate, light and overexposure; **Auto-configure**; **Set play zone** by dragging on the video; test the robot connection. Manual camera settings and camera delay tests are folded away |
+| **2 Record** | Choose person, session type and gesture, press **Record** (3-second countdown). A live motion preview confirms movement is seen; the progress list shows which of the 7 sessions this person still needs |
+| **3 Dataset** | All recordings with totals and free disk space; **Build** training images; check labels with a grid of random samples per person and gesture |
+| **4 Train** | Accuracy check (each person left out in turn), train and test on one person, or train on everyone; live accuracy curves and the expected accuracy on a new person |
+| **5 Evaluate** | **Dextra model check** (no training): ranks rotation, flip, movement per image and zoom, and saves your motion images next to Dextra's. **Compare recognition methods** on recordings, with a verdict |
+| **6 Play** | Top: You, Robot, Round (for example "Pump 2 of 3") and your learned Tempo (s per pump). Camera view, the **delay graph** (processing, motion model, hand tracker, camera interval) and health readouts. Right: **Run** (recognition, game, model, robot; shrinks to one line while playing) and **Readings** (motion image beside Dextra's examples, confidence bars, hand tracker, decision). Orientation, tuning and log are folded away |
+| **Settings** | Every setting by section; tick "Show advanced settings" for fine-tuning. Save / Undo changes / Reset to defaults |
+
+**Countdown pumps adapt to the player.** Pumps are measured from the hand's up-and-down speed in the play zone (optical flow), so a lost hand track does not lose a pump. The app learns each player's tempo and stroke size and scales its thresholds to them. The throw is the stroke that stops instead of reversing; a throw that lands on the beat still counts if one pump was missed.
+
+Heavy jobs (probe, build, train, evaluate, Dextra import) run the command-line scripts below as background processes and stream their output into the tab, so the app and the CLI always behave the same.
+
+## Workflow (command line)
 
 ### 0. Camera and play zone (do this in the real play lighting)
 1. Close OBS and anything else using the camera. Turn off Huawei PC Manager "AI camera" effects and any Windows camera effects (auto-framing or background blur change the whole image and flood the emulator).
@@ -113,6 +135,17 @@ It ends with the **go/no-go rule**: if fused doesn't beat MediaPipe-only on held
 python replay_eval.py --recordings data/recordings/bob --sweep vote.k=1,2,3
 python replay_eval.py --recordings data/recordings/bob --set decision.still_frames=1
 ```
+
+### Optional: Dextra's pretrained model (ROSHAMBO17, ~20 people)
+```powershell
+python tools/import_dextra.py        # downloads Dextra's quantized weights -> models/dextra_roshambo.pth
+python play.py --source cnn --mode continuous --set cnn.model_path=models/dextra_roshambo.pth
+python play.py --source cnn --mode continuous --set cnn.model_path=models/dextra_roshambo.pth --set cnn.rotate=90
+```
+- The port was checked against the published data: ROSHAMBO17 test frames score 97–100% per class.
+- Dextra's camera sees the hand side-on with fingers pointing left. Use `cnn.rotate` / `cnn.flip` (and the ROI) to match that view.
+- Our 30 fps webcam events are blurrier than a real DVS. Whether the model transfers has to be measured with `replay_eval.py`; if it transfers only partly, fine-tune it on our recordings.
+- Licensing: ROSHAMBO17 is CC BY-SA 4.0. The Dextra repository has no license file, so its weights are git-ignored here and not redistributed.
 
 ### 5. Play fused
 ```powershell
@@ -175,6 +208,7 @@ Final acceptance: film human and robot hands together in 240 fps phone slow-moti
 ## Project structure
 
 ```
+app.py               desktop control centre (PySide6): Setup, Record, Dataset, Train, Evaluate, Play, Settings
 play.py              live runtime (camera or --video replay, HUD, ESP link)
 record_session.py    raw lossless session recorder (FFV1 + timestamps + meta)
 build_dataset.py     recordings -> pseudo-DVS frames (multi-N, frame-skip, MediaPipe labels)
@@ -183,10 +217,11 @@ replay_eval.py       offline evaluation of the exact live pipeline + go/no-go
 model.py             RoshamboNet, MajorityVote, counter-move table
 config.json          all tunables (defaults in rps/config.py)
 rps/                 camera, dvs_emulator, cnn, hand_tracker, voting, decision, pipeline,
-                     robot_link, hud, timing, perf, config
-tools/               camera_probe, set_roi, latency_test, mock_esp
+                     robot_link, recorder, hud, timing, perf, config
+rps/ui/              desktop app: camera worker, tabs, shared widgets
+tools/               camera_probe, set_roi, latency_test, mock_esp, import_dextra
 firmware/            ESP32 reference receiver
-tests/               pytest suite (emulator, voting, rules, decision, protocol, pipeline)
+tests/               pytest suite (emulator, voting, rules, decision, protocol, pipeline, Dextra import, UI)
 legacy/              v2 frame-differencing system, dataset and model (reference)
 ```
 

@@ -18,6 +18,9 @@ data/
 
 # Downloadable model assets
 models/*.task
+# Dextra weights and samples: the upstream repo has no license, so do not redistribute
+models/dextra/
+models/dextra_roshambo.pth
 
 # Per-run logs
 *.log

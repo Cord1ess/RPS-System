@@ -13,7 +13,6 @@ def synthetic_hand(extended):
     for f, chain in enumerate(FINGER_CHAINS):
         _, mcp, pip, dip, tip = chain
         pts[mcp] = (bases[f], 0.08, 0.0)
-        direction = np.array([0.0, 1.0, 0.0])
         bend = 0.0 if extended[f] else np.deg2rad(80)
         cur = pts[mcp].astype(np.float64)
         angle = 0.0

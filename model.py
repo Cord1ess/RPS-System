@@ -82,6 +82,31 @@ class RoshamboNet(nn.Module):
         return self.fc(x)
 
 
+class DextraRoshamboNet(nn.Module):
+    """
+    PyTorch port of Dextra's Keras RoshamboNet (SensorsINI/dextra-roshambo-python, deployed with
+    pooling="avg"): same spatial progression as RoshamboNet but no BatchNorm and no dropout.
+    Weights come from tools/import_dextra.py. Output classes are in DEXTRA_CLASS_ORDER.
+    """
+    def __init__(self, num_classes=4):
+        super(DextraRoshamboNet, self).__init__()
+        self.convs = nn.ModuleList([
+            nn.Conv2d(1, 16, kernel_size=5), nn.Conv2d(16, 32, kernel_size=3), nn.Conv2d(32, 64, kernel_size=3),
+            nn.Conv2d(64, 128, kernel_size=3), nn.Conv2d(128, 128, kernel_size=1),
+        ])
+        self.fc = nn.Linear(128, num_classes)
+
+    def forward(self, x):
+        for conv in self.convs:
+            x = F.avg_pool2d(F.relu(conv(x)), 2)
+        return self.fc(torch.flatten(x, 1))
+
+
+# Dextra's output order (globals_and_utils.py SYMBOL_TO_PRED_DICT) and its mapping onto CLASS_NAMES
+DEXTRA_CLASS_ORDER = ["paper", "scissors", "rock", "background"]
+DEXTRA_TO_OURS = [DEXTRA_CLASS_ORDER.index(LABEL_TO_SYMBOL[i]) for i in range(4)]   # probs_ours = probs[DEXTRA_TO_OURS]
+
+
 class MajorityVote:
     """
     Exact port of majority_vote temporal filter from dextra-roshambo-python consumer.py.

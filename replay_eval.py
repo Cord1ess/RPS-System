@@ -237,6 +237,8 @@ def evaluate(recordings, cfg, sources, cnn, hand_cache, csv_rows=None, tag="") -
             if csv_rows is not None:
                 csv_rows.append({"tag": tag, "source": source, **s})
         results[source] = aggregate(scores)
+        # machine-readable line for the desktop app (Evaluate tab)
+        print("@@RESULT " + json.dumps({"setting": tag, "source": source, **results[source]}), flush=True)
     return results
 
 
@@ -260,7 +262,7 @@ def main():
     if any(s in ("fused", "cnn") for s in sources):
         if os.path.exists(cfg.cnn.model_path):
             from rps.cnn import GestureCNN
-            cnn = GestureCNN(cfg.cnn.model_path, cfg.cnn.threads)
+            cnn = GestureCNN(cfg.cnn.model_path, cfg.cnn.threads, cfg.cnn.rotate, cfg.cnn.flip)
             for w in cnn.check_dvs(cfg.dvs):
                 print(f"[replay] WARNING: {w}")
         else:

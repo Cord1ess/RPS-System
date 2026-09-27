@@ -57,6 +57,7 @@ class PseudoDVS:
         self.reset()
 
     def reset(self):
+        self.last_sensor: Optional[np.ndarray] = None
         self.l_ref: Optional[np.ndarray] = None
         self.l_prev: Optional[np.ndarray] = None
         self.acc = np.zeros((self.cfg.frame_size, self.cfg.frame_size), dtype=np.int64)
@@ -104,6 +105,7 @@ class PseudoDVS:
         cfg = self.cfg
         fs = cfg.frame_size
         gray = self.to_sensor(roi_img)
+        self.last_sensor = gray
         l_now = self.lut[gray]
 
         if self.l_ref is None:

@@ -16,10 +16,10 @@ def engine(mode="continuous", use_cnn=True, use_mp=True, **kw):
     return DecisionEngine(cfg, VoteConfig(k=2, min_confidence=0.7), use_cnn=use_cnn, use_mp=use_mp)
 
 
-def step(eng, i, events, cnn=None, mp=None, events_in_hand=None, centroid_y=None):
+def step(eng, i, events, cnn=None, mp=None, events_in_hand=None, centroid_y=None, vy=None):
     t = i / FPS
     poses = []
-    p = eng.on_motion(MotionObs(i, t, events, centroid_y, cnn))
+    p = eng.on_motion(MotionObs(i, t, events, centroid_y, cnn, vy))
     if p:
         poses.append((t, p))
     if mp is not None:
@@ -84,66 +84,86 @@ def test_mediapipe_corrects_when_still_after_margin():
 
 # ----------------------------------------------------------------------------- countdown
 
-def countdown_trajectory(final_gesture, pumps=3, period=0.4, top=0.35, bottom=0.65, hold_s=1.0):
-    """Per-frame (y, events, cnn_label, mp_gesture) for pumps + final downstroke + hold."""
+def countdown_trajectory(final_gesture, pumps=3, period=0.4, top=0.35, bottom=0.65, hold_s=1.0, drop_pump=None):
+    """Per-frame (y, vy, events, gesture) for pumps + final downstroke + hold. drop_pump hides one pump's motion."""
     frames = []
     n_pump = int(period * FPS)
     for p in range(pumps):
         for k in range(n_pump):
             y = top + (bottom - top) * 0.5 * (1 - np.cos(2 * np.pi * k / n_pump))
-            frames.append([y, ROCK, ROCK])
-    n_down = int(0.2 * FPS)
+            frames.append([y, ROCK, p == drop_pump])
+    n_down = max(4, int(period * FPS) // 2)
     for k in range(n_down + 1):
         y = top + (bottom - top) * 0.5 * (1 - np.cos(np.pi * k / n_down))
-        late = k > n_down // 2
-        g = final_gesture if late else ROCK
-        frames.append([y, g, g])
+        frames.append([y, final_gesture if k > n_down // 2 else ROCK, False])
     for _ in range(int(hold_s * FPS)):
-        frames.append([bottom, final_gesture, final_gesture])
+        frames.append([bottom, final_gesture, False])
     out, prev_y = [], frames[0][0]
-    for y, cnn_label, mp_g in frames:
+    for y, g, hidden in frames:
+        vy = (y - prev_y) * FPS
         events = int(abs(y - prev_y) * 6000)
         prev_y = y
-        out.append((y, events, cnn_label, mp_g))
+        out.append((y, 0.0 if hidden else vy, events, g))
     return out
 
 
 def run_countdown(final_gesture, use_cnn=True, use_mp=True, **kw):
+    traj_kw = {k: kw.pop(k) for k in ("pumps", "period", "drop_pump") if k in kw}
     eng = engine(mode="countdown", use_cnn=use_cnn, use_mp=use_mp, **kw)
     poses, states = [], []
-    for i, (y, events, cnn_label, mp_g) in enumerate(countdown_trajectory(final_gesture)):
-        cnn = (cnn_label, 0.9) if events >= 100 else None
-        poses += step(eng, i, events, cnn=cnn, mp=hand(mp_g, y=y) if use_mp else None,
-                      centroid_y=y)
+    for i, (y, vy, events, g) in enumerate(countdown_trajectory(final_gesture, **traj_kw)):
+        cnn = (g, 0.9) if events >= 100 else None
+        poses += step(eng, i, events, cnn=cnn, mp=hand(g, y=y) if use_mp else None, vy=vy)
         states.append(eng.state)
     return eng, poses, states
 
 
+def decided(poses):
+    return [p for _, p in poses if p != READY]
+
+
 def test_countdown_scissors_commits_once_after_pumps():
     eng, poses, states = run_countdown(SCISSORS)
-    assert [p for _, p in poses if p != READY] == ["R"]
+    assert decided(poses) == ["R"]
     assert eng.commits == 1 and eng.state == HOLD
     assert SHOOT in states and states.index(SHOOT) > states.index(ARMED)
 
 
 def test_countdown_paper_commits_once():
     eng, poses, _ = run_countdown(PAPER)
-    assert [p for _, p in poses if p != READY] == ["S"]
+    assert decided(poses) == ["S"]
 
 
-def test_countdown_rock_never_commits_during_pumps():
+def test_countdown_rock_only_after_the_throw_lands():
     eng, poses, states = run_countdown(ROCK)
     commits = [(t, p) for t, p in poses if p != READY]
-    assert commits and commits[0][1] == "P" and len(commits) == 1
-    t_commit = commits[0][0]
-    shoot_frame = states.index(SHOOT)
-    # the final downstroke (6 frames) must have happened before rock is allowed
-    assert t_commit * FPS >= shoot_frame + 6
+    assert [p for _, p in commits] == ["P"]
+    # never during the pumps: the commit comes after the third pump put us in SHOOT
+    assert commits[0][0] * FPS > states.index(SHOOT)
 
 
-def test_countdown_events_only_pump_source():
+def test_countdown_motion_model_only():
     eng, poses, _ = run_countdown(SCISSORS, use_mp=False)
-    assert [p for _, p in poses if p != READY] == ["R"]
+    assert decided(poses) == ["R"]
+
+
+def test_countdown_fast_and_slow_players():
+    for period in (0.3, 0.7):
+        for gesture, pose in ((PAPER, "S"), (ROCK, "P")):
+            eng, poses, _ = run_countdown(gesture, period=period)
+            assert decided(poses) == [pose], (period, gesture)
+            assert eng.pump.tempo is not None
+
+
+def test_countdown_missed_pump_still_catches_the_throw():
+    # the second pump is invisible (tracking lost): only 2 pumps counted, the throw lands on the beat
+    eng, poses, _ = run_countdown(ROCK, drop_pump=1)
+    assert decided(poses) == ["P"] and eng.commits == 1
+
+
+def test_countdown_extra_pump_is_not_the_throw():
+    eng, poses, _ = run_countdown(PAPER, pumps=4)
+    assert decided(poses) == ["S"] and eng.commits == 1
 
 
 def test_countdown_starts_idle_and_arms():

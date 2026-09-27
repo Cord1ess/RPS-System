@@ -8,15 +8,15 @@
     "fourcc": "YUY2",
     "mirror": true,
     "lock_exposure": false,
-    "exposure": -6.0,
+    "exposure": -5.0,
     "lock_white_balance": false,
     "wb_temperature": 4500,
     "restore_auto_on_exit": true
   },
   "roi": {
-    "x": 140,
-    "y": 60,
-    "size": 360,
+    "x": 302,
+    "y": 88,
+    "size": 309,
     "record_margin": 0.25
   },
   "dvs": {
@@ -35,7 +35,9 @@
   },
   "cnn": {
     "model_path": "models/motion_cnn_v3.pth",
-    "threads": 1
+    "threads": 1,
+    "rotate": 0,
+    "flip": false
   },
   "hand": {
     "model_path": "models/hand_landmarker.task",
@@ -70,6 +72,7 @@
     "idle_action": "ready",
     "pumps_before_shoot": 3,
     "pump_source": "auto",
+    "pump_miss_tolerance": 1,
     "pump_min_amplitude": 0.08,
     "pump_min_period_s": 0.18,
     "shoot_window_s": 1.2,

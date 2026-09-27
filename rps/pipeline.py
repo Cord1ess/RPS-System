@@ -17,6 +17,7 @@ from rps.config import Config
 from rps.decision import DecisionEngine, MotionObs, Snapshot
 from rps.dvs_emulator import DvsFrame, DvsStats, PseudoDVS, events_in_box
 from rps.hand_tracker import HandObs
+from rps.motion import VerticalMotion
 
 
 @dataclass
@@ -33,6 +34,38 @@ class StepResult:
     cnn_ms: float = 0.0
     mp_ms: float = 0.0
     total_ms: float = 0.0
+    vy: Optional[float] = None
+
+
+def load_models(cfg: Config, source_mode: str) -> Tuple[object, object, List[str]]:
+    """
+    Loads the CNN and/or MediaPipe for source_mode ("fused" | "cnn" | "mediapipe"), degrading
+    gracefully in fused mode. Returns (cnn, hand, messages); raises RuntimeError if nothing usable.
+    """
+    import os
+    cnn = hand = None
+    messages: List[str] = []
+    if source_mode in ("fused", "cnn"):
+        if os.path.exists(cfg.cnn.model_path):
+            from rps.cnn import GestureCNN
+            cnn = GestureCNN(cfg.cnn.model_path, cfg.cnn.threads, cfg.cnn.rotate, cfg.cnn.flip)
+            messages += [f"WARNING: {w}" for w in cnn.check_dvs(cfg.dvs)]
+        elif source_mode == "cnn":
+            raise RuntimeError(f"CNN model '{cfg.cnn.model_path}' not found. Train one (train.py) "
+                               f"or import Dextra's (tools/import_dextra.py).")
+        else:
+            messages.append(f"CNN model '{cfg.cnn.model_path}' not found -> MediaPipe only.")
+    if source_mode in ("fused", "mediapipe") and cfg.hand.enabled:
+        try:
+            from rps.hand_tracker import HandTracker
+            hand = HandTracker(cfg.hand)
+        except Exception as e:  # MediaPipe missing or model file absent
+            if source_mode == "mediapipe":
+                raise RuntimeError(f"MediaPipe unavailable: {e}")
+            messages.append(f"MediaPipe unavailable ({e}) -> CNN only.")
+    if cnn is None and hand is None:
+        raise RuntimeError("Neither the CNN nor MediaPipe is available.")
+    return cnn, hand, messages
 
 
 class Pipeline:
@@ -44,6 +77,7 @@ class Pipeline:
         self.pose_sink = pose_sink
         self.allow_mp_skip = allow_mp_skip
         self.dvs = PseudoDVS(cfg.dvs)
+        self.motion = VerticalMotion()
         self.engine = DecisionEngine(cfg.decision, cfg.vote, use_cnn=cnn is not None, use_mp=hand is not None)
         self.last_dvs_frame: Optional[DvsFrame] = None
 
@@ -76,8 +110,10 @@ class Pipeline:
                             cnn_ms=cnn_ms)
 
         centroid_y = stats.centroid[1] if stats.centroid is not None else None
+        vy = self.motion.update(self.dvs.last_sensor, frame.t)
+        result.vy = vy
         motion = MotionObs(frame.id, frame.t, stats.events, centroid_y,
-                           (cnn_out[0], cnn_out[1]) if cnn_out is not None else None)
+                           (cnn_out[0], cnn_out[1]) if cnn_out is not None else None, vy)
         self._emit_pose(self.engine.on_motion(motion), result)
 
         if self.hand is not None:
@@ -94,7 +130,7 @@ class Pipeline:
 
     def log_record(self, r: StepResult) -> dict:
         snap = r.snapshot
-        sent = r.poses[0][1] if r.poses else None
+        sent = r.poses[0][1] if (r.poses and r.frame.live) else None   # only meaningful on the camera clock
         return {
             "frame_id": r.frame.id,
             "t_capture": r.frame.t,

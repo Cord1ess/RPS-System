@@ -1,30 +1,33 @@
 """
-Decision engine: fuses CNN (motion) and MediaPipe (still hand) evidence and runs the game.
+Decision engine: fuses motion-model (CNN) and hand-tracker (MediaPipe) evidence and runs the game.
 
 Pure logic, no I/O: the pipeline feeds it per-frame observations in a fixed order
 (on_motion first, so the CNN path is never delayed; then on_hand for the same frame).
 Both calls return the new robot pose ("R", "P", "S" or "N" = ready) when it changes, else None.
 
 Fusion rules
-- While motion is active the CNN is the authority: a SequenceVote commit switches immediately.
-- MediaPipe may commit as the still-hand authority only when its frame has (almost) no events
-  inside the hand box and was captured after the last CNN commit plus a margin, so a late,
-  blurred mid-throw fist cannot overwrite a correct paper/scissors commit.
-- Hysteresis (dead time) applies to MediaPipe-driven switches and to A->B->A flips only.
+- While the hand moves the CNN is the authority: a vote commit switches immediately.
+- The hand tracker decides only when the hand is still (few events in its box) and after the last
+  CNN decision plus a margin, so a late, blurred mid-throw fist cannot overwrite a correct commit.
+- Hysteresis (dead time) applies to tracker-driven switches and to A->B->A flips only.
 - A background vote never changes the command (Dextra behaviour).
 
 Game modes
 - continuous: the robot always shows the counter to the current decision.
-- countdown: IDLE -> ARMED (count pumps) -> SHOOT (paper/scissors commit on vote, rock commits
-  on settle) -> HOLD. The pumping fist is ignored because it is also "rock".
+- countdown: IDLE -> ARMED (count pumps) -> SHOOT -> HOLD. Pumps come from rps.motion's
+  RhythmPumpDetector, which learns the player's tempo. The throw is the stroke that lands (stops)
+  instead of reversing; one missed pump is tolerated when the landing comes on the beat.
+  Paper/scissors commit as soon as they are seen; rock (the pumping fist) only once the throw has
+  landed.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from model import COUNTER_MOVES
 from rps.config import DecisionConfig, VoteConfig
 from rps.hand_tracker import BACKGROUND, PAPER, ROCK, SCISSORS, HandObs
+from rps.motion import RhythmPumpDetector
 from rps.voting import make_voter
 
 READY = "N"
@@ -42,6 +45,7 @@ class MotionObs:
     events: int                                 # filtered events of this webcam frame
     centroid_y: Optional[float] = None          # event centroid, ROI-normalized
     cnn: Optional[Tuple[int, float]] = None     # (label, confidence) if a DVS frame was classified
+    vy: Optional[float] = None                  # vertical hand velocity, play-zone heights/s (+ = down)
 
 
 @dataclass
@@ -58,47 +62,7 @@ class Snapshot:
     cnn_vote: Optional[int] = None
     mp_gesture: Optional[int] = None
     reason: str = ""
-
-
-class PumpDetector:
-    """Counts downstroke bottoms (image y maxima) with amplitude hysteresis and a min period."""
-
-    def __init__(self, min_amplitude: float, min_period_s: float):
-        self.min_amplitude = min_amplitude
-        self.min_period_s = min_period_s
-        self.reset()
-
-    def reset(self):
-        self.extreme: Optional[float] = None
-        self.extreme_t = 0.0
-        self.direction = 0            # +1 moving down (y grows), -1 moving up
-        self.last_bottom_t = -1e9
-
-    def update(self, t: float, y: Optional[float]) -> bool:
-        """Returns True when a bottom is confirmed (the hand rose again by min_amplitude)."""
-        if y is None:
-            return False
-        if self.extreme is None:
-            self.extreme, self.extreme_t = y, t
-            return False
-        if self.direction >= 0:
-            if y > self.extreme:
-                self.extreme, self.extreme_t = y, t
-                self.direction = 1
-            elif self.direction == 1 and self.extreme - y >= self.min_amplitude:
-                bottom_t = self.extreme_t
-                self.direction, self.extreme, self.extreme_t = -1, y, t
-                if bottom_t - self.last_bottom_t >= self.min_period_s:
-                    self.last_bottom_t = bottom_t
-                    return True
-            elif self.direction == 0 and self.extreme - y >= self.min_amplitude:
-                self.direction, self.extreme, self.extreme_t = -1, y, t
-        else:
-            if y < self.extreme:
-                self.extreme, self.extreme_t = y, t
-            elif y - self.extreme >= self.min_amplitude:
-                self.direction, self.extreme, self.extreme_t = 1, y, t
-        return False
+    tempo: Optional[float] = None               # learned seconds per pump
 
 
 class DecisionEngine:
@@ -107,8 +71,9 @@ class DecisionEngine:
         self.use_cnn = use_cnn
         self.use_mp = use_mp
         self.voter = make_voter(vote_cfg)
-        self.pump = PumpDetector(cfg.pump_min_amplitude, cfg.pump_min_period_s)
-        self.pump_from_mp = use_mp and cfg.pump_source in ("auto", "mp")
+        self.pump = RhythmPumpDetector(cfg.pump_min_amplitude, min_period_s=cfg.pump_min_period_s)
+        self.pump_from_mp = use_mp and cfg.pump_source == "mp"
+        self._wrist = None                      # (t, y) for wrist velocity when pump_source == "mp"
         self.mode = cfg.mode
         self.pose = READY
         self.human: Optional[int] = None
@@ -123,9 +88,10 @@ class DecisionEngine:
         self.motion_active = False
         self.still_run = 0
         self.last_motion_t = -1e9
-        self.settled_t = -1e9
         # evidence
         self.cnn_vote: Optional[int] = None
+        self.last_vote: Optional[int] = None
+        self.last_vote_t = -1e9
         self.cnn_rock_t = -1e9
         self.mp_gesture: Optional[int] = None
         self.mp_count = 0
@@ -134,8 +100,9 @@ class DecisionEngine:
         # countdown
         self.state = IDLE
         self.pumps = 0
+        self.last_bottom_t = -1e9
         self.shoot_t = -1e9
-        self.shoot_descended = False
+        self.shoot_landed = False
         self.reason = ""
 
     # ---------------------------------------------------------------- public API
@@ -152,20 +119,25 @@ class DecisionEngine:
     def snapshot(self) -> Snapshot:
         return Snapshot(self.mode, self.state if self.mode == "countdown" else "LIVE", self.pose, self.human,
                         self.last_source, self.motion_active, self.pumps, self.switches, self.commits,
-                        self.cnn_vote, self.mp_gesture, self.reason)
+                        self.cnn_vote, self.mp_gesture, self.reason, self.pump.tempo)
 
     def on_motion(self, obs: MotionObs) -> Optional[str]:
         t = obs.t
-        settled = self._update_motion(obs)
+        self._update_motion(obs)
         vote = None
         if obs.cnn is not None and self.use_cnn:
             vote = self.voter.update(obs.cnn[0], obs.cnn[1], t)
             self.cnn_vote = vote
+            if vote in (ROCK, PAPER, SCISSORS):
+                self.last_vote, self.last_vote_t = vote, t
             if vote == ROCK:
                 self.cnn_rock_t = t
         if self.mode == "continuous":
-            return self._continuous_motion(t, vote)
-        return self._countdown_motion(t, vote, settled, obs.centroid_y)
+            if vote in (ROCK, PAPER, SCISSORS):
+                return self._commit(vote, "cnn", t)
+            return self._continuous_idle(t)
+        event = None if self.pump_from_mp else self.pump.update(t, obs.vy)
+        return self._countdown(t, event, vote)
 
     def on_hand(self, t: float, hand: Optional[HandObs], events_in_hand: Optional[int]) -> Optional[str]:
         if hand is None or hand.skipped or not self.use_mp:
@@ -173,25 +145,27 @@ class DecisionEngine:
         self._update_mp(t, hand)
         eligible = self._mp_eligible(t, events_in_hand)
         if self.mode == "continuous":
-            return self._continuous_hand(t, eligible)
-        return self._countdown_hand(t, hand, eligible)
+            if eligible:
+                return self._commit(self.mp_gesture, "mp", t)
+            return self._continuous_idle(t)
+        event = self.pump.update(t, self._wrist_velocity(t, hand)) if self.pump_from_mp else None
+        out = self._countdown(t, event, None)
+        if out is None and self.state == HOLD and self.cfg.correction_s > 0 and eligible \
+                and t - self.commit_t <= self.cfg.correction_s and self.mp_gesture != self.human:
+            out = self._commit(self.mp_gesture, "mp", t, force=True)
+        return out
 
     # ---------------------------------------------------------------- evidence tracking
-    def _update_motion(self, obs: MotionObs) -> bool:
-        """Updates motion activity; returns True on the frame where motion settles."""
+    def _update_motion(self, obs: MotionObs):
         cfg = self.cfg
         if obs.events >= cfg.active_events_per_frame:
             self.motion_active = True
             self.still_run = 0
             self.last_motion_t = obs.t
-            return False
-        if obs.events < cfg.still_events_per_frame:
+        elif obs.events < cfg.still_events_per_frame:
             self.still_run += 1
             if self.motion_active and self.still_run >= cfg.still_frames:
                 self.motion_active = False
-                self.settled_t = obs.t
-                return True
-        return False
 
     def _update_mp(self, t: float, hand: HandObs):
         self.mp_present = hand.present
@@ -204,6 +178,15 @@ class DecisionEngine:
         else:
             self.mp_gesture, self.mp_count = None, 0
 
+    def _wrist_velocity(self, t: float, hand: HandObs) -> Optional[float]:
+        if not hand.present or hand.wrist_y is None:
+            self._wrist = None
+            return None
+        prev, self._wrist = self._wrist, (t, hand.wrist_y)
+        if prev is None or t <= prev[0]:
+            return None
+        return (hand.wrist_y - prev[1]) / (t - prev[0])
+
     def _mp_stable(self) -> bool:
         return self.mp_gesture is not None and self.mp_count >= self.cfg.mp_stable_frames
 
@@ -211,7 +194,7 @@ class DecisionEngine:
         if not self._mp_stable():
             return False
         if not self.use_cnn:
-            return True     # MediaPipe-only: it is the sole authority
+            return True     # hand tracker only: it is the sole authority
         still = events_in_hand is None or events_in_hand <= self.cfg.mp_still_events_in_hand
         return still and t >= self.last_cnn_commit_t + self.cfg.mp_after_cnn_commit_s
 
@@ -251,17 +234,6 @@ class DecisionEngine:
         self.reason = f"{GESTURE_NAME[gesture]} via {source}"
         return self._set_pose(COUNTER_POSE[gesture])
 
-    # ---------------------------------------------------------------- continuous mode
-    def _continuous_motion(self, t: float, vote: Optional[int]) -> Optional[str]:
-        if vote in (ROCK, PAPER, SCISSORS):
-            return self._commit(vote, "cnn", t)
-        return self._continuous_idle(t)
-
-    def _continuous_hand(self, t: float, eligible: bool) -> Optional[str]:
-        if eligible:
-            return self._commit(self.mp_gesture, "mp", t)
-        return self._continuous_idle(t)
-
     def _continuous_idle(self, t: float) -> Optional[str]:
         if self.human is not None and self.cfg.idle_action == "ready" and self._idle(t):
             self.human = None
@@ -275,103 +247,90 @@ class DecisionEngine:
         self.reason = reason
         if state in (IDLE, ARMED):
             self.pumps = 0
-            self.pump.reset()
+            self.pump.reset()                  # keeps the learned rhythm
             self.voter.reset()
             self.human = None
             if state == ARMED or self.cfg.idle_action == "ready":
                 return self._set_pose(READY)
         if state == SHOOT:
             self.shoot_t = t
-            self.shoot_descended = False
-            self.voter.reset()
-        if state == HOLD:
-            self.pump.reset()
+            self.shoot_landed = False
         return None
 
-    def _pump_y(self, centroid_y: Optional[float], hand: Optional[HandObs]) -> Optional[float]:
-        if self.pump_from_mp:
-            return hand.wrist_y if hand is not None and hand.present else None
-        return centroid_y
+    def _shoot_window(self) -> float:
+        tempo = self.pump.tempo
+        return max(self.cfg.shoot_window_s, 3.0 * tempo) if tempo else self.cfg.shoot_window_s
 
-    def _countdown_common(self, t: float, y: Optional[float]) -> Optional[str]:
-        """
-        Presence, pump counting and timeouts. Called exactly once per frame from whichever
-        stream carries the pump position (on_hand for MediaPipe wrist y, on_motion for events).
-        """
+    def _countdown(self, t: float, event: Optional[str], vote: Optional[int]) -> Optional[str]:
         cfg = self.cfg
         if self.state == IDLE:
             if self._hand_present(t) or self.motion_active:
                 return self._enter(ARMED, t, "hand in play zone")
             return None
+
         if self.state == ARMED:
             if self._idle(t):
                 return self._enter(IDLE, t, "no hand")
-            if self.pump.update(t, y):
+            if event == "bottom":
                 self.pumps += 1
+                self.last_bottom_t = t
                 self.reason = f"pump {self.pumps}"
                 if self.pumps >= cfg.pumps_before_shoot:
-                    return self._enter(SHOOT, t, "shoot!")
+                    self._enter(SHOOT, t, "throw")
+            elif event == "landed" and self.pumps >= max(1, cfg.pumps_before_shoot - cfg.pump_miss_tolerance):
+                self._enter(SHOOT, t, "throw landed")
+                self.shoot_landed = True
+                return self._shoot_decide(t, vote)
             return None
+
         if self.state == SHOOT:
-            self.pump.update(t, y)
-            if self.pump.direction == 1:
-                self.shoot_descended = True
-            if t - self.shoot_t > cfg.shoot_window_s:
-                return self._enter(ARMED, t, "shoot window expired")
-            return None
+            if event == "bottom":                  # still pumping: the throw has not come yet
+                self.pumps += 1
+                self.last_bottom_t = t
+                self.shoot_t, self.shoot_landed = t, False
+                self.reason = f"pump {self.pumps}"
+                return None
+            if event == "landed":
+                self.shoot_landed = True
+            if t - self.shoot_t > self._shoot_window():
+                return self._enter(ARMED, t, "no throw seen")
+            return self._shoot_decide(t, vote)
+
         if self.state == HOLD:
             held = t - self.commit_t
             if held >= cfg.hold_max_s:
                 return self._enter(ARMED, t, "hold expired")
-            bottom = self.pump.update(t, y)
             if held >= cfg.hold_min_s:
                 if self._idle(t):
                     return self._enter(IDLE, t, "hand left")
-                if bottom:
+                if event == "bottom":
                     out = self._enter(ARMED, t, "new round")
                     self.pumps = 1
+                    self.last_bottom_t = t
                     return out
         return None
 
-    def _rock_allowed(self, t: float) -> bool:
-        """
-        Rock is the pumping fist, so it may only commit once the final downstroke has been
-        seen (or, if position tracking was lost, after a fallback delay) and the hand settled.
-        """
-        since = t - self.shoot_t
-        if since < self.cfg.rock_min_shoot_s:
-            return False
-        return self.shoot_descended or since >= self.cfg.rock_settle_fallback_s
-
-    def _shoot_commit(self, gesture: int, source: str, t: float) -> Optional[str]:
-        res = self._commit(gesture, source, t, force=True)
-        self.state = HOLD
-        self.pump.reset()
-        return res
-
-    def _countdown_motion(self, t: float, vote: Optional[int], settled: bool,
-                          centroid_y: Optional[float]) -> Optional[str]:
-        out = None if self.pump_from_mp else self._countdown_common(t, centroid_y)
-        if self.state != SHOOT:
-            return out
+    def _shoot_decide(self, t: float, vote: Optional[int]) -> Optional[str]:
+        """Commits the throw as soon as the evidence allows it."""
         if vote in (PAPER, SCISSORS):
-            return self._shoot_commit(vote, "cnn", t)
-        if settled and self._rock_allowed(t):
-            if self.cnn_rock_t >= self.shoot_t:
-                return self._shoot_commit(ROCK, "cnn", t)
-            if self.use_mp and self.mp_gesture == ROCK:
-                return self._shoot_commit(ROCK, "mp", t)
-        return out
-
-    def _countdown_hand(self, t: float, hand: HandObs, eligible: bool) -> Optional[str]:
-        out = self._countdown_common(t, self._pump_y(None, hand)) if self.pump_from_mp else None
-        if out is not None:
-            return out
-        if self.state == SHOOT and self._mp_stable():
-            g = self.mp_gesture
-            if g in (PAPER, SCISSORS) or (g == ROCK and not self.motion_active and self._rock_allowed(t)):
-                return self._shoot_commit(g, "mp", t)
-        if self.state == HOLD and self.cfg.correction_s > 0 and eligible:
-            if t - self.commit_t <= self.cfg.correction_s and self.mp_gesture != self.human:
-                return self._commit(self.mp_gesture, "mp", t, force=True)
+            return self._decided(vote, "cnn", t)
+        if self.use_mp and self._mp_stable() and self.mp_gesture in (PAPER, SCISSORS):
+            return self._decided(self.mp_gesture, "mp", t)
+        since = t - self.shoot_t
+        fallback = since >= self.cfg.rock_settle_fallback_s and not self.motion_active
+        if not (self.shoot_landed or fallback) or since < 0:
+            return None
+        stroke_start = self.last_bottom_t            # the final stroke began after the last pump
+        if self.use_cnn and self.last_vote in (PAPER, SCISSORS) and self.last_vote_t > stroke_start:
+            return self._decided(self.last_vote, "cnn", t)
+        if self.use_mp and self.mp_gesture is not None:
+            return self._decided(self.mp_gesture, "mp", t)
+        if self.use_cnn and self.cnn_rock_t > stroke_start:
+            return self._decided(ROCK, "cnn", t)
         return None
+
+    def _decided(self, gesture: int, source: str, t: float) -> Optional[str]:
+        out = self._commit(gesture, source, t, force=True)
+        self.state = HOLD
+        self.reason = f"{GESTURE_NAME[gesture]} via {source}"
+        return out

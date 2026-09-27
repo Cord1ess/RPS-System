@@ -58,8 +58,10 @@ class DvsConfig:
 
 @dataclass
 class CnnConfig:
-    model_path: str = "models/motion_cnn_v3.pth"
+    model_path: str = "models/motion_cnn_v3.pth"   # or models/dextra_roshambo.pth (tools/import_dextra.py)
     threads: int = 1
+    rotate: int = 0                 # rotate DVS frames CCW before the CNN: 0 | 90 | 180 | 270
+    flip: bool = False              # mirror DVS frames left-right before the CNN
 
 
 @dataclass
@@ -100,9 +102,10 @@ class DecisionConfig:
     idle_action: str = "ready"      # "ready" | "hold"
     # Countdown mode
     pumps_before_shoot: int = 3
-    pump_source: str = "auto"            # "auto" (MediaPipe wrist if available) | "mp" | "events"
-    pump_min_amplitude: float = 0.08     # fraction of ROI height
-    pump_min_period_s: float = 0.18
+    pump_source: str = "flow"            # "flow" (optical flow in the play zone) | "mp" (tracked wrist)
+    pump_miss_tolerance: int = 1         # a throw that lands on the beat may come this many pumps early
+    pump_min_amplitude: float = 0.06     # smallest stroke before the player's own size is learned (zone heights)
+    pump_min_period_s: float = 0.15
     shoot_window_s: float = 1.2
     rock_min_shoot_s: float = 0.15       # rock may commit on settle only after this long in SHOOT
     rock_settle_fallback_s: float = 0.35  # ... and after the final downstroke, or this long if y was lost

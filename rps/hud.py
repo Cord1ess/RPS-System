@@ -40,11 +40,13 @@ def draw_hand(img: np.ndarray, roi: Roi, hand: Optional[HandObs]):
                       (255, 200, 0), 1)
 
 
-def draw_dvs_preview(img: np.ndarray, dvs_frame: Optional[DvsFrame], label: str = "pseudo-DVS"):
+def draw_dvs_preview(img: np.ndarray, dvs_frame, label: str = "pseudo-DVS"):
+    """dvs_frame: a DvsFrame, a 64x64 uint8 array, or None."""
     h, w = img.shape[:2]
     x0, y0 = w - PREVIEW - 10, BANNER_H + 10
-    if dvs_frame is not None:
-        big = cv2.resize(dvs_frame.image, (PREVIEW, PREVIEW), interpolation=cv2.INTER_NEAREST)
+    frame = dvs_frame.image if isinstance(dvs_frame, DvsFrame) else dvs_frame
+    if frame is not None:
+        big = cv2.resize(frame, (PREVIEW, PREVIEW), interpolation=cv2.INTER_NEAREST)
         img[y0:y0 + PREVIEW, x0:x0 + PREVIEW] = cv2.applyColorMap(big, cv2.COLORMAP_INFERNO)
     else:
         img[y0:y0 + PREVIEW, x0:x0 + PREVIEW] = 0
