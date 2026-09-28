@@ -37,7 +37,9 @@ def test_app_end_to_end(qapp, tmp_path):
     shutil.copy("config.json", tmp_path / "config.json")
     state = AppState(str(tmp_path / "config.json"), str(tmp_path / "data"))
     state.cfg.robot.port = 42199                       # avoid clashing with a real mock ESP on 4210
-    w = MainWindow(state, start_kind="mock")
+    state.cfg.robot.mode = "simulated"                 # never the real robot in tests
+    w = MainWindow(state, start_kind="mock", remember=False)
+    w.confirm_close = False
     try:
         setup = w.pages[0]
         select_data(setup.source, "mock")
@@ -45,8 +47,8 @@ def test_app_end_to_end(qapp, tmp_path):
         pump(qapp, 1.5)
         assert "fps" in setup.chip_fps.text()
 
-        w.tabs.setCurrentIndex(1)
-        rec = w.pages[1]
+        w.tabs.setCurrentIndex(2)
+        rec = w.pages[2]
         rec.person.setEditText("tester")
         select_data(rec.kind, "show")
         select_data(rec.label, "rock")
@@ -59,10 +61,9 @@ def test_app_end_to_end(qapp, tmp_path):
         assert "Saved" in rec.status.text()
 
         if os.path.exists(state.cfg.hand.model_path):
-            w.tabs.setCurrentIndex(5)
-            play = w.pages[5]
+            w.tabs.setCurrentIndex(7)
+            play = w.pages[7]                              # Play Debug
             select_data(play.detector, "mediapipe")
-            play.mock_esp.setChecked(True)
             play._toggle()                                 # models load in the background
             pump(qapp, 3.0)
             assert play.pipeline is not None and not play._loading

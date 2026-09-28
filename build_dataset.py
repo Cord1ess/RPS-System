@@ -32,7 +32,6 @@ import json
 import os
 import time
 from collections import Counter, defaultdict
-from dataclasses import asdict
 from typing import Dict, List
 
 import numpy as np
@@ -41,28 +40,21 @@ from model import CLASS_NAMES, SYMBOL_TO_LABEL
 from rps.camera import VideoFileSource, crop_roi
 from rps.config import load_config
 from rps.dvs_emulator import PseudoDVS
-from rps.hand_tracker import HAND_RULES_VERSION
+from rps.hand_tracker import tracker_fingerprint
 from rps.perf import boost_process
 
 EXCLUDE = -1
-MIN_HAND_VISIBLE = 0.6      # warn when the hand tracker finds the hand in fewer frames than this
+MIN_HAND_VISIBLE = 0.6      # warn when Mediapipe finds the hand in fewer frames than this
 
 
 def find_recordings(root: str) -> List[str]:
     return sorted(os.path.dirname(p) for p in glob.glob(os.path.join(root, "**", "meta.json"), recursive=True))
 
 
-def mp_fingerprint(hand_cfg) -> str:
-    """Changes whenever the cached hand-tracker readings could differ: model file, settings, rules."""
-    size = os.path.getsize(hand_cfg.model_path) if os.path.exists(hand_cfg.model_path) else 0
-    key = f"{size}|{json.dumps(asdict(hand_cfg), sort_keys=True)}|{HAND_RULES_VERSION}"
-    return hashlib.md5(key.encode()).hexdigest()[:12]
-
-
 def mediapipe_track(rec_dir: str, hand_cfg) -> Dict[str, np.ndarray]:
-    """Per-webcam-frame MediaPipe readings, cached in the recording folder."""
+    """Per-webcam-frame Mediapipe readings, cached in the recording folder."""
     cache = os.path.join(rec_dir, "mp_cache.npz")
-    fp = mp_fingerprint(hand_cfg)
+    fp = tracker_fingerprint(hand_cfg)
     if os.path.exists(cache):
         data = np.load(cache)
         if str(data["fingerprint"]) == fp:
@@ -191,8 +183,8 @@ def main():
             meta = json.load(f)
         name = f"{meta['person']}/{meta['session_id']}"
         if args.no_mp and meta["type"] == "throws":
-            # Without the hand tracker the pumping fists would all be labelled with the thrown gesture.
-            warnings.append(f"{name}: skipped; countdown throws need the hand tracker to tell pumps from the throw")
+            # Without Mediapipe the pumping fists would all be labelled with the thrown gesture.
+            warnings.append(f"{name}: skipped; countdown throws need Mediapipe to tell pumps from the throw")
             continue
         src = VideoFileSource(rec_dir)
         times = np.array(src.times, np.float64)

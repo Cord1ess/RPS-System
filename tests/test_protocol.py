@@ -5,7 +5,7 @@ import time
 import numpy as np
 import pytest
 
-from rps.robot_link import (ESP_RST_BROWNOUT, MockEsp, RobotLink, encode_ack, encode_led, encode_pose,
+from rps.robot_link import (ESP_RST_BROWNOUT, MockEsp, RobotLink, encode_ack, encode_angle, encode_led, encode_pose,
                             encode_text_pose, parse_message)
 
 
@@ -220,3 +220,30 @@ def test_simulated_robot_understands_team_commands_and_stays_silent():
     finally:
         link.stop()
         esp.stop()
+
+
+def test_finger_angle_command_matches_the_team_tuning_tool():
+    assert encode_angle(0, 0) == b"ANGLE:0,0" and encode_angle(2, 180) == b"ANGLE:2,180"
+    for channel, angle in ((3, 90), (-1, 90), (1, 181), (1, -5), (1, 90.5), (1, True)):
+        with pytest.raises(ValueError):
+            encode_angle(channel, angle)
+    assert parse_message(b"ANGLE:1,90") == {"type": "ANGLE", "channel": 1, "angle": 90}
+    for bad in (b"ANGLE:1,190", b"ANGLE:4,90", b"ANGLE:1", b"ANGLE:a,b", b"ANGLE:1,2,3"):
+        assert parse_message(bad) is None
+
+
+def test_finger_angles_and_moves_share_one_socket_and_replies_come_back():
+    esp = MockEsp(port=42186, verbose=False).start()
+    said = []
+    link = RobotLink("127.0.0.1", 42186, protocol="rps_text", on_text=said.append).start()
+    try:
+        assert link.send_raw(encode_angle(1, 120)) and link.send_raw(encode_angle(0, 0))
+        link.send_pose("S")
+        time.sleep(0.3)
+        assert said == ["OK ANGLE:1,120", "OK ANGLE:0,0"]              # the confirmations, in order
+        assert esp.angles == {1: 120, 0: 0} and esp.pose == "S"
+    finally:
+        link.stop()
+        esp.stop()
+    with pytest.raises(RuntimeError):
+        RobotLink("127.0.0.1", 42187, protocol="ack").send_raw(b"ANGLE:0,0")     # the reference firmware has none

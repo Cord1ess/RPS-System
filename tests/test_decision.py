@@ -328,3 +328,15 @@ def test_real_recording_every_throw_decided_once():
     for (tc, _), tt in zip(commits, throws):      # each decision belongs to its own throw
         assert -0.1 <= tc - tt <= 0.25
     assert 0.3 <= eng.pump.tempo <= 0.45
+
+
+def test_mediapipe_steadiness_is_a_time_so_it_means_the_same_at_any_frame_rate():
+    for fps, images_needed in ((30.0, 3), (16.0, 2)):      # a clean 30 fps camera; one sending ~16 new images/s
+        eng = DecisionEngine(DecisionConfig(mode="continuous"), VoteConfig(), use_cnn=False, use_mp=True)
+        seen = 0
+        while not eng._mp_stable():
+            eng._update_mp(10.0 + seen / fps, HandObs(present=True, gesture=PAPER, confidence=0.9))
+            seen += 1
+        assert seen == images_needed
+        eng._update_mp(10.0 + seen / fps, HandObs(present=True, gesture=SCISSORS, confidence=0.9))
+        assert not eng._mp_stable()                               # a new gesture starts its own time

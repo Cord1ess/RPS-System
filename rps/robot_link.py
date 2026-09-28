@@ -6,6 +6,10 @@ READY); the counter logic stays on the PC. Two firmware protocols (robot.protoco
     PC  -> ESP  RPS:ROCK | RPS:PAPER | RPS:SCISSORS
     Sent once when the robot's move changes. The firmware has no READY command, so READY sends
     nothing and the hand keeps its last move; there is no LED command.
+    Finger tuning (Bot tuning page), the one command it answers:
+    PC  -> ESP  ANGLE:<channel>,<angle>       channel 0 pinky + ring, 1 index, 2 middle + point;
+                                              angle 0 (extended) ... 180 (folded)
+    ESP -> PC   a confirmation text, to the sender's address and port
 
 "ack" (firmware/esp32_rps_receiver, the reference sketch), default port 4210:
     PC  -> ESP  P,<seq>,<pose>,<pc_ms>        pose in {R, P, S, N}
@@ -19,12 +23,14 @@ import socket
 import threading
 import time
 from collections import deque
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 POSES = ("R", "P", "S", "N")
 PROTOCOLS = ("rps_text", "ack")
 TEXT_COMMAND = {"R": "RPS:ROCK", "P": "RPS:PAPER", "S": "RPS:SCISSORS"}   # the team firmware has no READY
 ESP_RST_BROWNOUT = 9    # esp_reset_reason(): the supply dipped (usually servos on the ESP32's own power)
+FINGER_CHANNELS = {0: "Pinky + Ring", 1: "Index", 2: "Middle + Point"}   # the team firmware's servo channels
+ANGLE_MIN, ANGLE_MAX = 0, 180                                         # extended ... folded
 
 
 def encode_text_pose(pose: str) -> Optional[bytes]:
@@ -33,6 +39,15 @@ def encode_text_pose(pose: str) -> Optional[bytes]:
         raise ValueError(f"Invalid pose '{pose}'")
     command = TEXT_COMMAND.get(pose)
     return command.encode("utf-8") if command else None
+
+
+def encode_angle(channel: int, angle: int) -> bytes:
+    """The team firmware's direct servo command, as its own tuning tool sends it."""
+    if channel not in FINGER_CHANNELS:
+        raise ValueError(f"Invalid channel {channel!r}: use 0, 1 or 2")
+    if isinstance(angle, bool) or int(angle) != angle or not ANGLE_MIN <= angle <= ANGLE_MAX:
+        raise ValueError(f"Invalid angle {angle!r}: use a whole number from {ANGLE_MIN} to {ANGLE_MAX}")
+    return f"ANGLE:{channel},{int(angle)}".encode("ascii")
 
 
 def encode_pose(seq: int, pose: str, pc_ms: int) -> bytes:
@@ -56,6 +71,13 @@ def parse_message(data: bytes) -> Optional[Dict]:
         if text.startswith("RPS:"):
             pose = {v: k for k, v in TEXT_COMMAND.items()}.get(text)
             return {"type": "RPS", "pose": pose} if pose else None
+        if text.startswith("ANGLE:"):
+            parts = text[len("ANGLE:"):].split(",")
+            if len(parts) == 2:
+                channel, angle = int(parts[0]), int(parts[1])
+                if channel in FINGER_CHANNELS and ANGLE_MIN <= angle <= ANGLE_MAX:
+                    return {"type": "ANGLE", "channel": channel, "angle": angle}
+            return None
         parts = text.split(",")
         kind = parts[0]
         if kind == "P" and len(parts) == 4 and parts[2] in POSES:
@@ -72,7 +94,7 @@ def parse_message(data: bytes) -> Optional[Dict]:
 
 class RobotLink:
     def __init__(self, host: str, port: int = 4210, heartbeat_s: float = 0.1, ack_timeout_s: float = 0.5,
-                 protocol: str = "ack"):
+                 protocol: str = "ack", on_text: Optional[Callable[[str], None]] = None):
         if protocol not in PROTOCOLS:
             raise ValueError(f"Unknown robot protocol '{protocol}'")
         try:
@@ -102,12 +124,14 @@ class RobotLink:
         self.reboots = 0                   # times the robot restarted while linked (its clock went back)
         self._last_esp_ms: Optional[int] = None
         self._send_error: Optional[str] = None
+        self.on_text = on_text             # called (in the link's thread) with any other text the robot sends back
 
     @classmethod
-    def from_config(cls, robot_cfg, host: Optional[str] = None) -> "RobotLink":
+    def from_config(cls, robot_cfg, host: Optional[str] = None,
+                    on_text: Optional[Callable[[str], None]] = None) -> "RobotLink":
         """The link described by config.robot; `host` overrides the address (e.g. a simulated robot)."""
         return cls(host or robot_cfg.host, robot_cfg.port, robot_cfg.heartbeat_s, robot_cfg.ack_timeout_s,
-                   robot_cfg.protocol)
+                   robot_cfg.protocol, on_text)
 
     def start(self) -> "RobotLink":
         self._running = True
@@ -150,6 +174,21 @@ class RobotLink:
             self._next_heartbeat = time.perf_counter() + self.heartbeat_s
         return seq
 
+    def send_raw(self, payload: bytes) -> bool:
+        """Sends one datagram as it is, from this link's socket (e.g. the team firmware's ANGLE command).
+        True if it went out."""
+        if self.protocol == "ack":
+            raise RuntimeError("Raw commands are for the team firmware only.")
+        with self._lock:
+            sent = self.sent
+            self._seq += 1
+            self._send(payload, self._seq)
+            return self.sent > sent
+
+    @property
+    def send_error(self) -> Optional[str]:
+        return self._send_error
+
     def send_led(self, on: bool) -> int:
         if self.protocol != "ack":
             raise RuntimeError("The robot's firmware (RPS:<GESTURE> commands) has no LED command.")
@@ -177,10 +216,12 @@ class RobotLink:
         self._next_heartbeat = time.perf_counter() + self.heartbeat_s
         while self._running:
             try:
-                data, sender = self.sock.recvfrom(256)
+                data, sender = self.sock.recvfrom(1024)
                 msg = parse_message(data)
                 if msg and msg["type"] == "A":
                     self._on_ack(msg, sender)
+                elif self.on_text is not None and sender[0] == self.addr[0]:
+                    self.on_text(data.decode("utf-8", errors="replace").strip())
             except socket.timeout:
                 pass
             except OSError:
@@ -228,7 +269,8 @@ class RobotLink:
 class MockEsp:
     """
     In-process ESP32 stand-in for either protocol: logs pose changes, acknowledges the reference
-    protocol's messages and, like the team firmware, stays silent on RPS:<GESTURE> commands.
+    protocol's messages and, like the team firmware, stays silent on RPS:<GESTURE> commands and
+    confirms ANGLE commands (its confirmation text is its own: the real firmware's may differ).
     """
 
     def __init__(self, port: int = 4210, host: str = "127.0.0.1", verbose: bool = True):
@@ -238,6 +280,7 @@ class MockEsp:
         self.verbose = verbose
         self.pose = "N"
         self.pose_log = []
+        self.angles = {}                   # channel -> last ANGLE received
         self.received = 0                  # valid messages of either protocol
         self._t0 = time.perf_counter()
         self._running = False
@@ -270,6 +313,14 @@ class MockEsp:
                     print(f"[mock_esp] t={esp_ms:7d} ms  {what}  POSE -> {self.pose}")
             elif msg["type"] == "L" and self.verbose:
                 print(f"[mock_esp] t={esp_ms:7d} ms  LED {'ON' if msg['on'] else 'OFF'}")
+            elif msg["type"] == "ANGLE":
+                self.angles[msg["channel"]] = msg["angle"]
+                if self.verbose:
+                    print(f"[mock_esp] t={esp_ms:7d} ms  channel {msg['channel']} -> {msg['angle']} deg")
+                try:
+                    self.sock.sendto(f"OK ANGLE:{msg['channel']},{msg['angle']}".encode("ascii"), addr)
+                except OSError:
+                    pass
             if msg["type"] in ("P", "L"):
                 try:
                     self.sock.sendto(encode_ack(msg["seq"], esp_ms, 1), addr)   # 1 = ESP_RST_POWERON

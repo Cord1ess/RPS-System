@@ -58,10 +58,11 @@ class DvsConfig:
 
 @dataclass
 class CnnConfig:
-    model_path: str = "models/dextra_roshambo.pth"   # tools/import_dextra.py; train.py writes models/motion_cnn_v3.pth
+    raw_model: str = "models/dextra_roshambo.pth"      # "Dextra Raw": as downloaded (tools/import_dextra.py)
+    tuned_model: str = "models/dextra_tuned.pth"       # "Dextra Tuned": tuned on our recordings (train.py)
     threads: int = 1
-    rotate: int = 0                 # rotate DVS frames CCW before the CNN: 0 | 90 | 180 | 270
-    flip: bool = False              # mirror DVS frames left-right before the CNN
+    rotate: int = 0                 # Dextra Raw: turn its image CCW first: 0 | 90 | 180 | 270
+    flip: bool = False              # Dextra Raw: mirror its image first (a tuned model keeps its own)
 
 
 @dataclass
@@ -88,12 +89,12 @@ class VoteConfig:
 
 @dataclass
 class DecisionConfig:
-    mode: str = "countdown"         # "continuous" | "countdown"
-    source: str = "fused"           # "fused" | "cnn" | "mediapipe"
+    mode: str = "countdown"         # "countdown" | "guided" (beat guide) | "continuous"
+    recognizer: str = "both"        # "dextra_raw" | "dextra_tuned" | "mediapipe" | "both" (Dextra Tuned + Mediapipe)
     active_events_per_frame: int = 100   # webcam-frame events above this -> motion active
     still_events_per_frame: int = 40     # webcam-frame events below this -> still
     still_frames: int = 2           # consecutive still frames -> motion stopped ("settled")
-    mp_stable_frames: int = 3       # MediaPipe gesture must repeat this many frames
+    mp_stable_ms: float = 45.0      # Mediapipe gesture must hold this long (2+ camera images; 3 frames at 30 fps)
     mp_min_confidence: float = 0.60
     mp_still_events_in_hand: int = 25    # MediaPipe is still-hand authority only below this
     mp_after_cnn_commit_s: float = 0.15  # ... and only this long after the last CNN commit
@@ -102,25 +103,43 @@ class DecisionConfig:
     idle_action: str = "ready"      # "ready" | "hold"
     # Countdown mode
     pumps_before_shoot: int = 3
-    pump_source: str = "flow"            # "flow" (optical flow in the play zone) | "mp" (tracked wrist)
     pump_miss_tolerance: int = 1         # a throw that lands on the beat may come this many pumps early
-    pump_min_amplitude: float = 0.06     # smallest stroke before the player's own size is learned (zone heights)
-    pump_min_period_s: float = 0.15
+    pump_min_rise: float = 0.02          # smallest rise after a low point that counts as a pump (zone heights)
+    pump_min_period_s: float = 0.12
     shoot_window_s: float = 1.2
     rock_settle_fallback_s: float = 0.35  # decide rock this long into the throw if its landing was not seen
     hold_min_s: float = 0.3              # movement right after a result is ignored; the next pump starts a round
     hold_max_s: float = 4.0
     correction_s: float = 0.0            # MediaPipe may correct a commit within this window (0 = off)
+    # Guided mode (beat guide): the throw is read in a window around the throw beat
+    guided_early_s: float = 0.35         # how early before the beat a throw is accepted
+    guided_late_s: float = 0.8           # how late after the beat; later = a missed round
+    guided_rock_after_s: float = 0.3     # a hand still closed this long after the beat is rock
 
 
 @dataclass
 class RobotConfig:
-    enabled: bool = True
+    mode: str = "real"              # "real" | "simulated" (a stand-in on this computer) | "off"
     protocol: str = "rps_text"      # "rps_text": team firmware (RPS:ROCK ...) | "ack": firmware/esp32_rps_receiver
     host: str = "192.168.0.126"     # the team ESP32 on the local network (reference sketch soft-AP: 192.168.4.1)
     port: int = 4210
     heartbeat_s: float = 0.10       # "ack" only: resend period (its firmware falls back to READY after 2 s)
     ack_timeout_s: float = 0.5      # "ack" only
+    # Finger tuning (team firmware's ANGLE:<channel>,<angle>): the last angle sent per servo channel,
+    # 0 = extended ... 180 = folded. Channels: 0 pinky + ring, 1 index, 2 middle + point.
+    finger_angles: List[int] = field(default_factory=lambda: [0, 0, 0])
+
+
+@dataclass
+class GameConfig:
+    rounds: int = 5                 # rounds per match on the Play page; 0 = endless (until Stop)
+    beat_bpm: float = 150.0         # beat guide tempo (150 = 0.4 s per beat, a natural pump pace)
+    sound: str = "drum"             # beat guide sound: "drum" | "wood" (wood block) | "beep"
+    beat_volume: float = 0.6        # the steady beat, 0-1
+    cue_volume: float = 1.0         # the count (3, 2, 1) and SHOOT, 0-1
+    audio_latency_ms: float = 40.0  # time from a beat being played to it being heard
+    lead_beats: int = 4             # soft beats before the first round
+    gap_beats: int = 4              # beats between a throw and the next round (the result shows)
 
 
 @dataclass
@@ -144,6 +163,7 @@ class Config:
     vote: VoteConfig = field(default_factory=VoteConfig)
     decision: DecisionConfig = field(default_factory=DecisionConfig)
     robot: RobotConfig = field(default_factory=RobotConfig)
+    game: GameConfig = field(default_factory=GameConfig)
     latency: LatencyConfig = field(default_factory=LatencyConfig)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -155,15 +175,18 @@ ALLOWED: Dict[tuple, tuple] = {
     ("camera", "backend"): ("msmf", "dshow", "any"),
     ("cnn", "rotate"): (0, 90, 180, 270),
     ("vote", "method"): ("sequence", "majority"),
-    ("decision", "mode"): ("countdown", "continuous"),
-    ("decision", "source"): ("fused", "cnn", "mediapipe"),
+    ("decision", "mode"): ("countdown", "guided", "continuous"),
+    ("decision", "recognizer"): ("both", "dextra_raw", "dextra_tuned", "mediapipe"),
     ("decision", "idle_action"): ("ready", "hold"),
-    ("decision", "pump_source"): ("flow", "mp"),
+    ("robot", "mode"): ("real", "simulated", "off"),
     ("robot", "protocol"): ("rps_text", "ack"),
+    ("game", "sound"): ("drum", "wood", "beep"),
 }
 
 # Keys that older config.json files may still contain; they are skipped instead of rejected.
-REMOVED = {("decision", "rock_min_shoot_s")}
+REMOVED = {("decision", "rock_min_shoot_s"), ("decision", "pump_source"), ("decision", "pump_min_amplitude"),
+           ("decision", "source"), ("cnn", "model_path"), ("robot", "enabled"), ("decision", "mp_stable_frames"),
+           ("game", "volume")}
 
 
 def _coerce(current: Any, value: Any) -> Any:
@@ -176,7 +199,7 @@ def _coerce(current: Any, value: Any) -> Any:
         return int(float(value))
     if isinstance(current, float):
         return float(value)
-    if isinstance(current, dict) and isinstance(value, str):
+    if isinstance(current, (dict, list)) and isinstance(value, str):
         return json.loads(value)
     return value
 

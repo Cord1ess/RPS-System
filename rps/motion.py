@@ -5,8 +5,9 @@ VerticalMotion: dense optical flow (Farneback) on a small grayscale copy of the 
 the median vertical velocity of the moving pixels. It needs no hand detection, so it keeps
 working through motion blur, and costs about 1 ms per frame.
 
-RhythmPumpDetector: turns that velocity into pump and landing events and learns the player's
-tempo and stroke size, so thresholds and time windows fit fast and slow players alike.
+PumpDetector: finds pumps in the hand's height, taken from the tracked wrist when Mediapipe sees
+the hand and carried through gaps by that vertical motion. It learns the player's pump size and
+tempo, so small and large, fast and slow pumps are all counted.
 """
 
 from typing import Optional
@@ -46,132 +47,126 @@ class VerticalMotion:
         return float(np.median(fy[moving])) / self.size / (t - prev_t)
 
 
-class RhythmPumpDetector:
+class PumpDetector:
     """
-    Events from vertical velocity (+ = down):
-      "bottom"  a down stroke followed by an up stroke (one pump). A short pause at the bottom
-                is allowed.
-      "landed"  a down stroke followed by stillness that lasts longer than a pump pause.
-                This is how a throw differs from a pump.
+    Events from the hand's height y (play-zone heights, + = down):
+      "bottom"  a low point followed by a rise of at least rise_threshold: one pump. Checked on a
+                real recording: 57 of 57 pumps (the previous speed-based detector caught 48).
+      "landed"  a down stroke that stops and stays down longer than a pump turn: the throw.
 
-    Adaptation: minimum stroke size and speed are fractions of the player's recent strokes;
-    the pause allowed at the bottom and the minimum time between pumps scale with their tempo.
+    rise_threshold is a fraction of the player's own recent swings (never below min_rise), so it
+    follows the size of their pumps; the minimum time between pumps and the landing time follow
+    their tempo. Using the height rather than the speed matters: fingers opening into scissors move
+    up quickly, but the hand does not rise, so a throw is not mistaken for a pump.
     """
 
-    def __init__(self, min_amplitude: float = 0.06, min_speed: float = 0.25, min_period_s: float = 0.15,
-                 history: int = 6):
-        self.base_amplitude = min_amplitude
-        self.base_speed = min_speed
-        self.base_period = min_period_s
+    def __init__(self, min_rise: float = 0.02, rise_fraction: float = 0.3, min_period_s: float = 0.12,
+                 first_rise: float = 0.05, history: int = 6):
+        self.min_rise = min_rise
+        self.rise_fraction = rise_fraction
+        self.min_period = min_period_s
+        self.first_rise = first_rise
         self.history = history
-        self.strokes, self.speeds, self.intervals = [], [], []
+        self.swings, self.intervals = [], []
         self.reset()
 
-    def reset(self, keep_rhythm: bool = True):
-        self.direction = 0              # +1 down, -1 up, 0 still
-        self.stroke = 0.0               # distance of the current movement run (play-zone heights)
-        self.peak = 0.0                 # peak speed of the current run
-        self.down_size = 0.0
-        self.down_end_t: Optional[float] = None
-        self.pending_bottom = False     # down stroke reversed: wait for real upward travel
-        self.pending_land_t: Optional[float] = None   # down stroke stopped: pump pause or throw?
+    def reset(self, keep_rhythm: bool = True, ignore_until: float = -1e9):
+        """
+        ignore_until: low points reached before this time are not pumps. Used after a throw: the
+        hand is still sinking into it (measured 0.2-0.3 s after the decision), while the next
+        round's first pump comes a beat or more later.
+        """
+        self.ignore_until = ignore_until
+        self.y: Optional[float] = None            # current height estimate
         self.last_t: Optional[float] = None
+        self.from_wrist = False                   # the last height came from the tracked wrist
+        self.trend = 0                            # +1 moving down, -1 moving up, 0 unknown
+        self.ext: Optional[float] = None          # lowest (trend >= 0) or highest (trend -1) point so far
+        self.ext_t: Optional[float] = None
+        self.top: Optional[float] = None          # last confirmed high point
+        self.last_turn: Optional[float] = None    # height of the last confirmed high or low point
+        self.landed_reported = False
         self.last_bottom_t = -1e9
         if not keep_rhythm:
-            self.strokes, self.speeds, self.intervals = [], [], []
+            self.swings, self.intervals = [], []
 
     # ------------------------------------------------------------------ learned rhythm
     @property
     def tempo(self) -> Optional[float]:
-        """Median seconds between pump bottoms, once two intervals are known."""
+        """Median seconds between pumps, once two intervals are known."""
         return float(np.median(self.intervals)) if len(self.intervals) >= 2 else None
 
     @property
-    def amplitude_threshold(self) -> float:
-        if len(self.strokes) >= 2:
-            return max(self.base_amplitude, 0.35 * float(np.median(self.strokes)))
-        return self.base_amplitude
-
-    @property
-    def speed_threshold(self) -> float:
-        if len(self.speeds) >= 2:
-            return max(0.6 * self.base_speed, 0.2 * float(np.median(self.speeds)))
-        return self.base_speed
+    def rise_threshold(self) -> float:
+        if len(self.swings) >= 2:
+            return max(self.min_rise, self.rise_fraction * float(np.median(self.swings)))
+        return max(self.min_rise, self.first_rise)
 
     @property
     def land_seconds(self) -> float:
-        """Stillness after a down stroke that counts as a landing rather than a pump pause."""
+        """Stillness at the bottom that means a throw landed rather than a pump turning."""
         tempo = self.tempo
-        return max(0.10, min(0.35, 0.35 * tempo)) if tempo else 0.15
+        return max(0.10, min(0.35, 0.4 * tempo)) if tempo else 0.15
 
     def _remember(self, lst, value):
         lst.append(value)
         del lst[:-self.history]
 
     # ------------------------------------------------------------------ per frame
-    def update(self, t: float, vy: Optional[float]) -> Optional[str]:
+    def update(self, t: float, vy: Optional[float], wrist_y: Optional[float] = None) -> Optional[str]:
         dt = 0.0 if self.last_t is None else max(0.0, t - self.last_t)
         self.last_t = t
-        if vy is None:
+        if wrist_y is not None:                       # the tracked wrist is the height when it is seen
+            if self.y is not None and not self.from_wrist:
+                self._shift(wrist_y - self.y)         # re-found after a gap: move the reference, not the hand
+            self.y, self.from_wrist = wrist_y, True
+        elif vy is not None:                          # otherwise the play zone's motion carries the height
+            self.y = (self.y or 0.0) + vy * dt
+            self.from_wrist = False
+        if self.y is None:
             return None
-        v_on = self.speed_threshold
-        if vy > v_on:
-            d = 1
-        elif vy < -v_on:
-            d = -1
-        elif abs(vy) < 0.5 * v_on:
-            d = 0
-        else:
-            d = self.direction                      # hysteresis band: keep going
-
-        if d != self.direction:
-            resume = self._transition(t, d)
-            self.direction = d
-            self.stroke, self.peak = resume, 0.0
-        if d != 0:
-            self.stroke += abs(vy) * dt
-            self.peak = max(self.peak, abs(vy))
-
-        if self.pending_bottom and self.direction == -1 and self.stroke >= 0.5 * self.amplitude_threshold:
-            return self._confirm_bottom()
-        if self.pending_land_t is not None and self.direction == 0 \
-                and t - self.pending_land_t >= self.land_seconds:
-            self.pending_land_t = None
-            return "landed"
+        y = self.y
+        if self.ext is None:
+            self.ext, self.ext_t = y, t
+            return None
+        rise = self.rise_threshold
+        if self.trend >= 0:                           # going down (or not known yet): track the low point
+            if y > self.ext:
+                self.ext, self.ext_t, self.landed_reported = y, t, False
+            elif self.ext - y >= rise:                # it rose enough: that low point was a pump
+                bottom_t = self.ext_t
+                self._turn(self.ext)
+                self.trend, self.ext, self.ext_t = -1, y, t
+                return None if bottom_t < self.ignore_until else self._bottom(bottom_t)
+            elif (not self.landed_reported and self.top is not None and self.ext - self.top >= rise
+                  and t - self.ext_t >= self.land_seconds):
+                self.landed_reported = True           # came down and stayed down: the throw landed
+                return "landed"
+            return None
+        if y < self.ext:                              # going up: track the high point
+            self.ext, self.ext_t = y, t
+        elif y - self.ext >= rise:                    # it fell enough: that was the top of the pump
+            self._turn(self.ext)
+            self.top = self.ext
+            self.trend, self.ext, self.ext_t, self.landed_reported = 1, y, t, False
         return None
 
-    def _transition(self, t: float, new_dir: int) -> float:
-        """Handles the end of the current run; returns the stroke to resume (merged down strokes)."""
-        size = self.stroke
-        if self.direction != 0 and size >= self.amplitude_threshold:
-            self._remember(self.strokes, size)
-            self._remember(self.speeds, self.peak)
-        if self.direction == 1:                             # a down stroke ended
-            if size >= self.amplitude_threshold:
-                self.down_size, self.down_end_t = size, t
-                if new_dir == -1:
-                    self.pending_bottom, self.pending_land_t = True, None
-                else:
-                    self.pending_land_t = t
-        elif self.direction == 0 and self.pending_land_t is not None:
-            if new_dir == -1:                               # rose after a short pause: it was a pump
-                self.pending_bottom, self.pending_land_t = True, None
-            elif new_dir == 1:                              # kept going down: same stroke
-                self.pending_land_t = None
-                return self.down_size
-        elif self.direction == -1:
-            self.pending_bottom = False
-        return 0.0
+    def _turn(self, turn_y: float):
+        """A confirmed high or low point: the distance from the previous one is a swing."""
+        if self.last_turn is not None:
+            self._remember(self.swings, abs(turn_y - self.last_turn))
+        self.last_turn = turn_y
 
-    def _confirm_bottom(self) -> Optional[str]:
-        self.pending_bottom = False
-        t = self.down_end_t
+    def _shift(self, offset: float):
+        for name in ("ext", "top", "last_turn"):
+            if getattr(self, name) is not None:
+                setattr(self, name, getattr(self, name) + offset)
+
+    def _bottom(self, t: float) -> Optional[str]:
         tempo = self.tempo
-        # Only rejects jitter (two bottoms within a fraction of a beat). A large factor here would
-        # make a wrongly learned slow tempo reject the real pumps and never correct itself.
-        min_gap = max(self.base_period, 0.3 * tempo) if tempo else self.base_period
+        min_gap = max(self.min_period, 0.3 * tempo) if tempo else self.min_period
         gap = t - self.last_bottom_t
-        if gap < min_gap:
+        if gap < min_gap:                             # a wobble at the same low point
             return None
         if gap <= MAX_PUMP_INTERVAL_S:
             self._remember(self.intervals, gap)

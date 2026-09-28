@@ -26,6 +26,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from rps.camera import is_repeat  # noqa: E402
 from rps.config import load_config, save_config  # noqa: E402
 
 BACKENDS = {"dshow": cv2.CAP_DSHOW, "msmf": cv2.CAP_MSMF}
@@ -47,16 +48,20 @@ def open_mode(index, backend, width=640, height=480, fps=30, fourcc="YUY2"):
 
 
 def measure(cap, seconds=2.5, warmup=1.0):
-    """Returns dict with mean fps, p90 interval, brightness and flicker ripple."""
+    """Returns dict with mean fps, p90 interval, brightness and flicker ripple. Only new images count: a
+    driver's repeat of the previous image (see rps.camera.is_repeat) is not a frame."""
     t_end = time.perf_counter() + warmup
     while time.perf_counter() < t_end:
         cap.read()
     stamps, means = [], []
+    prev, prev_t = None, None
     t_end = time.perf_counter() + seconds
     while time.perf_counter() < t_end:
         ok, img = cap.read()
-        if ok:
-            stamps.append(time.perf_counter())
+        t = time.perf_counter()
+        if ok and not is_repeat(img, t, prev, prev_t):
+            prev, prev_t = img, t
+            stamps.append(t)
             means.append(float(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).mean()))
     if len(stamps) < 3:
         return {"fps": 0.0, "p90_ms": float("nan"), "brightness": 0.0, "ripple": float("nan")}

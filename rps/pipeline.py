@@ -37,42 +37,80 @@ class StepResult:
     vy: Optional[float] = None
 
 
-def load_models(cfg: Config, source_mode: str) -> Tuple[object, object, List[str]]:
+# The four ways to read the hand, by the names used everywhere in the app.
+RECOGNIZERS = {
+    "dextra_raw": "Dextra Raw",
+    "dextra_tuned": "Dextra Tuned",
+    "mediapipe": "Mediapipe",
+    "both": "Both (Dextra Tuned + Mediapipe)",
+}
+
+
+def recognizer_parts(cfg: Config, recognizer: str) -> Tuple[Optional[str], bool]:
+    """(Dextra model file or None, whether Mediapipe runs) for a recognizer name."""
+    if recognizer not in RECOGNIZERS:
+        raise ValueError(f"Unknown recognizer '{recognizer}'")
+    model = {"dextra_raw": cfg.cnn.raw_model, "dextra_tuned": cfg.cnn.tuned_model,
+             "both": cfg.cnn.tuned_model}.get(recognizer)
+    return model, recognizer in ("mediapipe", "both")
+
+
+def missing_reason(cfg: Config, recognizer: str) -> Optional[str]:
+    """Why a recognizer cannot run as named (its model file is missing), or None."""
+    import os
+    model, _ = recognizer_parts(cfg, recognizer)
+    if model is None or os.path.exists(model):
+        return None
+    if model == cfg.cnn.raw_model:
+        return "Dextra Raw is not downloaded yet (Bot tuning or Play Debug: Download Dextra)."
+    return "Dextra Tuned does not exist yet: tune Dextra on the Train page."
+
+
+def load_models(cfg: Config, recognizer: str) -> Tuple[object, object, List[str]]:
     """
-    Loads the CNN and/or MediaPipe for source_mode ("fused" | "cnn" | "mediapipe"), degrading
-    gracefully in fused mode. Returns (cnn, hand, messages); raises RuntimeError if nothing usable.
+    Loads Dextra (raw or tuned) and/or Mediapipe for a recognizer. "Both" still runs on Mediapipe
+    alone when Dextra Tuned is missing. Returns (cnn, hand, messages); raises RuntimeError when the
+    chosen recognizer cannot run at all.
     """
     import os
     cnn = hand = None
     messages: List[str] = []
-    if source_mode in ("fused", "cnn"):
-        if os.path.exists(cfg.cnn.model_path):
+    model, use_mp = recognizer_parts(cfg, recognizer)
+    dextra = "Dextra Raw" if model == cfg.cnn.raw_model else "Dextra Tuned"
+    if model is not None:
+        if os.path.exists(model):
             from rps.cnn import GestureCNN
             try:
-                cnn = GestureCNN(cfg.cnn.model_path, cfg.cnn.threads, cfg.cnn.rotate, cfg.cnn.flip)
+                cnn = GestureCNN(model, cfg.cnn.threads, cfg.cnn.rotate, cfg.cnn.flip)
                 messages += [f"Note: {w}" for w in cnn.check_dvs(cfg.dvs)]
             except Exception as e:   # wrong or damaged file
-                if source_mode == "cnn":
-                    raise RuntimeError(f"The motion model file {cfg.cnn.model_path} could not be loaded: {e}")
-                messages.append(f"The motion model file {cfg.cnn.model_path} could not be loaded ({e}): using "
-                                f"the hand tracker only.")
-        elif source_mode == "cnn":
-            raise RuntimeError(f"The motion model file {cfg.cnn.model_path} does not exist. Download Dextra's "
-                               f"model on the Play page, or train one.")
+                if not use_mp:
+                    raise RuntimeError(f"{dextra} ({model}) could not be loaded: {e}")
+                messages.append(f"{dextra} ({model}) could not be loaded ({e}): playing with Mediapipe only.")
+        elif not use_mp:
+            raise RuntimeError(missing_reason(cfg, recognizer))
         else:
-            messages.append(f"The motion model file {cfg.cnn.model_path} does not exist: using the hand "
-                            f"tracker only.")
-    if source_mode in ("fused", "mediapipe") and cfg.hand.enabled:
+            messages.append(f"{missing_reason(cfg, recognizer)} Playing with Mediapipe only.")
+    if use_mp and cfg.hand.enabled:
         try:
             from rps.hand_tracker import HandTracker
             hand = HandTracker(cfg.hand)
         except Exception as e:  # MediaPipe missing or model file absent
-            if source_mode == "mediapipe":
-                raise RuntimeError(f"The hand tracker could not start: {e}")
-            messages.append(f"The hand tracker could not start ({e}): using the motion model only.")
+            if cnn is None:
+                raise RuntimeError(f"Mediapipe could not start: {e}")
+            messages.append(f"Mediapipe could not start ({e}): playing with {dextra} only.")
     if cnn is None and hand is None:
-        raise RuntimeError("Neither the motion model nor the hand tracker is available.")
+        raise RuntimeError("Neither Dextra nor Mediapipe is available.")
     return cnn, hand, messages
+
+
+def reader_name(source: str, cnn) -> str:
+    """Display name of the reader that made a decision ("cnn" / "mp" in the engine)."""
+    if source == "mp":
+        return "Mediapipe"
+    if source == "cnn":
+        return "Dextra Tuned" if getattr(cnn, "meta", {}).get("tuned_from") else "Dextra Raw"
+    return ""
 
 
 class Pipeline:

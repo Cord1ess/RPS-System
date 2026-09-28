@@ -1,10 +1,10 @@
 """
-Live runtime: webcam -> pseudo-DVS -> RoshamboNet -> vote -> decision -> ESP32, with the
-MediaPipe hand path as still-hand authority and fallback.
+Live runtime without the app window: webcam -> Dextra (motion image) and/or Mediapipe -> decision
+-> ESP32. The recognizers are named as in the app: dextra_raw, dextra_tuned, mediapipe, both.
 
 Examples:
-    python play.py                                   # fused, countdown mode, ESP at config address
-    python play.py --source mediapipe --mock-esp     # no CNN needed; logs poses from a local mock ESP
+    python play.py                                   # config.json settings (recognizer, mode, robot)
+    python play.py --recognizer mediapipe --mock-esp # simulated robot on this computer
     python play.py --mode continuous --set robot.host=192.168.4.1
     python play.py --video data/recordings/alice/<session>   # replay a recording in real time
     python play.py --mock-camera --headless 300 --mock-esp   # smoke test without camera or window
@@ -23,17 +23,18 @@ from rps.config import load_config
 from rps.hud import draw_banner, draw_card, draw_dvs_preview, draw_hand, draw_roi
 from rps.decision import GESTURE_NAME
 from rps.perf import boost_process
-from rps.pipeline import Pipeline, load_models
+from rps.game import ENDLESS_ROUNDS, BeatSchedule
+from rps.pipeline import RECOGNIZERS, Pipeline, load_models, reader_name
 from rps.robot_link import MockEsp, RobotLink
 from rps.timing import LatencyLog
 
-WINDOW = "RPS v3 - pseudo-DVS + MediaPipe"
+WINDOW = "RPS - Dextra + Mediapipe"
 
 
-def build_models(cfg, source_mode):
-    """Loads the CNN and/or MediaPipe according to --source, degrading gracefully."""
+def build_models(cfg, recognizer):
+    """Loads Dextra and/or Mediapipe for the recognizer, degrading gracefully for "both"."""
     try:
-        cnn, hand, messages = load_models(cfg, source_mode)
+        cnn, hand, messages = load_models(cfg, recognizer)
     except RuntimeError as e:
         sys.exit(f"[play] {e}")
     for msg in messages:
@@ -54,11 +55,12 @@ def main():
     parser = argparse.ArgumentParser(description="RPS v3 live runtime")
     parser.add_argument("--config", default="config.json")
     parser.add_argument("--set", action="append", default=[], metavar="SECTION.KEY=VALUE")
-    parser.add_argument("--source", choices=["fused", "cnn", "mediapipe"], default=None)
-    parser.add_argument("--mode", choices=["continuous", "countdown"], default=None)
+    parser.add_argument("--recognizer", choices=list(RECOGNIZERS), default=None)
+    parser.add_argument("--mode", choices=["countdown", "guided", "continuous"], default=None,
+                        help="guided: rounds follow the beat guide's timing (the beat is only heard in the app)")
     parser.add_argument("--video", default=None, help="Replay a recording directory instead of the camera")
     parser.add_argument("--mock-camera", action="store_true")
-    parser.add_argument("--mock-esp", action="store_true", help="Run a mock ESP on 127.0.0.1 and send to it")
+    parser.add_argument("--mock-esp", action="store_true", help="Simulated robot on this computer")
     parser.add_argument("--no-robot", action="store_true")
     parser.add_argument("--headless", type=int, default=0, help="Process N frames without a window")
     parser.add_argument("--log", default=None, help="Write a per-frame CSV log here")
@@ -68,24 +70,30 @@ def main():
     cfg = load_config(args.config, args.set)
     if args.mode:
         cfg.decision.mode = args.mode
-    source_mode = args.source or cfg.decision.source
-    cnn, hand = build_models(cfg, source_mode)
-    effective = "fused" if cnn and hand else ("cnn" if cnn else "mediapipe")
+    recognizer = args.recognizer or cfg.decision.recognizer
+    cnn, hand = build_models(cfg, recognizer)
+    effective = " + ".join(n for n, on in ((reader_name("cnn", cnn), cnn), ("Mediapipe", hand)) if on)
 
+    robot = "off" if args.no_robot else ("simulated" if args.mock_esp else cfg.robot.mode)
     mock_esp = link = None
-    if args.mock_esp:
+    if robot == "simulated":
         mock_esp = MockEsp(port=cfg.robot.port).start()
-        cfg.robot.host = "127.0.0.1"
-    if cfg.robot.enabled and not args.no_robot:
-        link = RobotLink.from_config(cfg.robot).start()
+    if robot != "off":
+        link = RobotLink.from_config(cfg.robot, host="127.0.0.1" if mock_esp else None).start()
 
     source = open_source(cfg.camera, cfg.roi, video=args.video, mock=args.mock_camera, realtime=True)
     pipeline = Pipeline(cfg, cnn, hand, pose_sink=link.send_pose if link else None)
+    if cfg.decision.mode == "guided":
+        g = cfg.game
+        schedule = BeatSchedule(time.perf_counter(), 60.0 / g.beat_bpm, cfg.decision.pumps_before_shoot,
+                                g.rounds or ENDLESS_ROUNDS, g.lead_beats, g.gap_beats)
+        pipeline.engine.start_guided(schedule, cfg.latency.camera_latency_ms / 1000.0)
     log = LatencyLog(args.log)
     show = args.headless <= 0
     if show:
         cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
-    print(f"[play] source={effective} mode={cfg.decision.mode}. Keys: q quit, m mode, r reset.")
+    print(f"[play] {RECOGNIZERS[recognizer]} (running: {effective}), mode {cfg.decision.mode}. "
+          f"Keys: q quit, m mode, r reset.")
 
     frames = 0
     try:
@@ -110,7 +118,7 @@ def main():
             draw_hand(display, source.roi, result.hand)
             stats = {"fps": log.fps(), "dvs_ms": log.mean("dvs_ms"), "cnn_ms": log.mean("cnn_ms"),
                      "mp_ms": log.mean("mp_ms"), "grab_to_send_ms": log.mean("grab_to_send_ms")}
-            draw_banner(display, "RPS v3  |  pseudo-DVS + RoshamboNet + MediaPipe", stats)
+            draw_banner(display, f"RPS  |  {RECOGNIZERS[recognizer]}", stats)
             draw_dvs_preview(display, pipeline.last_dvs_frame)
             raw_cnn, raw_mp = raw_readings(result)
             draw_card(display, result.snapshot, raw_cnn, raw_mp, link.stats() if link else None, effective)

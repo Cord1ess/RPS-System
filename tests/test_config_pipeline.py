@@ -28,14 +28,15 @@ def test_unknown_keys_rejected():
 
 def test_invalid_choice_rejected_on_command_line_but_file_still_loads(tmp_path):
     with pytest.raises(ValueError):
-        apply_overrides(Config(), parse_set_args(["decision.pump_source=auto"]))
+        apply_overrides(Config(), parse_set_args(["decision.recognizer=fused"]))
     with pytest.raises(ValueError):
         apply_overrides(Config(), parse_set_args(["cnn.rotate=45"]))
     path = tmp_path / "config.json"
-    path.write_text(json.dumps({"decision": {"pump_source": "auto", "mode": "continuous",
-                                             "rock_min_shoot_s": 0.15}}))   # old file: bad value + retired key
-    cfg = load_config(str(path))
-    assert cfg.decision.pump_source == "flow" and cfg.decision.mode == "continuous"
+    path.write_text(json.dumps({"decision": {"recognizer": "fused", "mode": "continuous", "source": "fused",
+                                             "pump_source": "auto", "rock_min_shoot_s": 0.15},
+                                "cnn": {"model_path": "models/x.pth"}, "robot": {"enabled": True}}))
+    cfg = load_config(str(path))                                       # old file: bad value + retired keys
+    assert cfg.decision.recognizer == "both" and cfg.decision.mode == "continuous"
 
 
 def test_ui_choices_match_the_allowed_values():
@@ -82,11 +83,11 @@ def test_fused_runs_on_the_hand_tracker_when_there_is_no_motion_model(tmp_path):
     cfg = Config()
     if not os.path.exists(cfg.hand.model_path):
         pytest.skip("hand tracker model not downloaded")
-    cfg.cnn.model_path = str(tmp_path / "not_trained_yet.pth")
-    cnn, hand, messages = load_models(cfg, "fused")
+    cfg.cnn.tuned_model = str(tmp_path / "not_trained_yet.pth")
+    cnn, hand, messages = load_models(cfg, "both")
     try:
         assert cnn is None and hand is not None
-        assert any("hand tracker only" in m for m in messages)
+        assert any("Playing with Mediapipe only" in m for m in messages)
         pipeline = Pipeline(cfg, cnn=None, hand=hand)
         source = MockSource(realtime=False).start()
         for _ in range(15):
@@ -102,13 +103,28 @@ def test_an_unusable_model_file_falls_back_or_explains(tmp_path):
     bare = tmp_path / "old_v2.pth"
     torch.save(RoshamboNet().state_dict(), bare)            # no meta: not made by train.py/import_dextra
     cfg = Config()
-    cfg.cnn.model_path = str(bare)
+    cfg.cnn.tuned_model = str(bare)
     with pytest.raises(RuntimeError, match="could not be loaded"):
-        load_models(cfg, "cnn")
+        load_models(cfg, "dextra_tuned")
     if not os.path.exists(cfg.hand.model_path):
         return
-    cnn, hand, messages = load_models(cfg, "fused")
+    cnn, hand, messages = load_models(cfg, "both")
     try:
-        assert cnn is None and hand is not None and any("hand tracker only" in m for m in messages)
+        assert cnn is None and hand is not None and any("Mediapipe only" in m for m in messages)
     finally:
         hand.close()
+
+
+
+def test_each_recognizer_uses_the_right_parts(tmp_path):
+    from rps.pipeline import RECOGNIZERS, missing_reason, recognizer_parts
+    cfg = Config()
+    assert list(RECOGNIZERS.values()) == ["Dextra Raw", "Dextra Tuned", "Mediapipe", "Both (Dextra Tuned + Mediapipe)"]
+    assert recognizer_parts(cfg, "dextra_raw") == (cfg.cnn.raw_model, False)
+    assert recognizer_parts(cfg, "dextra_tuned") == (cfg.cnn.tuned_model, False)
+    assert recognizer_parts(cfg, "mediapipe") == (None, True)
+    assert recognizer_parts(cfg, "both") == (cfg.cnn.tuned_model, True)
+    cfg.cnn.tuned_model = str(tmp_path / "none.pth")
+    assert "Train page" in missing_reason(cfg, "dextra_tuned") and missing_reason(cfg, "mediapipe") is None
+    with pytest.raises(RuntimeError, match="Train page"):
+        load_models(cfg, "dextra_tuned")

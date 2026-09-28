@@ -98,8 +98,9 @@ class CameraWorker(QThread):
                     payload = proc(frame, src) if proc is not None else {"display": frame.bgr}
                 except Exception:
                     payload = {"display": frame.bgr, "error": traceback.format_exc()}
-                payload["fps"] = self.fps
+                payload["fps"] = self.fps              # new images per second (driver repeats are skipped)
                 payload["roi"] = src.roi
+                payload["repeats"] = getattr(src, "repeats", 0)
                 with self._lock:
                     self._latest = payload
                 self.frame_ready.emit()

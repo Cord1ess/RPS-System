@@ -47,7 +47,7 @@ def draw_label(img: np.ndarray, text: str, org, color, scale: float = 0.5):
     cv2.putText(img, text, (x, y), FONT, scale, color, 1, cv2.LINE_AA)
 
 
-def draw_dvs_preview(img: np.ndarray, dvs_frame, label: str = "pseudo-DVS"):
+def draw_dvs_preview(img: np.ndarray, dvs_frame, label: str = "Dextra view"):
     """dvs_frame: a DvsFrame, a 64x64 uint8 array, or None."""
     h, w = img.shape[:2]
     x0, y0 = w - PREVIEW - 10, BANNER_H + 10
@@ -67,7 +67,7 @@ def draw_banner(img: np.ndarray, title: str, stats: Dict[str, Optional[float]]):
     cv2.putText(img, title, (12, 20), cv2.FONT_HERSHEY_DUPLEX, 0.55, (255, 255, 255), 1)
     fps = stats.get("fps") or 0.0
     parts = [f"cam {fps:4.1f} fps"]
-    for key, name in (("dvs_ms", "dvs"), ("cnn_ms", "cnn"), ("mp_ms", "mp"), ("grab_to_send_ms", "grab->send")):
+    for key, name in (("dvs_ms", "view"), ("cnn_ms", "Dextra"), ("mp_ms", "Mediapipe"), ("grab_to_send_ms", "grab->send")):
         v = stats.get(key)
         if v is not None:
             parts.append(f"{name} {v:4.1f}ms")
@@ -89,7 +89,7 @@ def draw_card(img: np.ndarray, snap: Snapshot, raw_cnn: Optional[str], raw_mp: O
     state = snap.state + (f"  pumps {snap.pumps}" if snap.mode == "countdown" else "")
     cv2.putText(img, f"mode {snap.mode} [{source_mode}] | {state} | {snap.reason}", (22, y0 + 56), FONT, 0.45,
                 (0, 255, 255), 1)
-    cv2.putText(img, f"raw CNN: {raw_cnn or '-'}   raw MP: {raw_mp or '-'}   motion: {'yes' if snap.motion_active else 'no'}",
+    cv2.putText(img, f"Dextra: {raw_cnn or '-'}   Mediapipe: {raw_mp or '-'}   moving: {'yes' if snap.motion_active else 'no'}",
                 (22, y0 + 78), FONT, 0.45, (200, 200, 200), 1)
     if link is None:
         link_txt, color = "ESP: disabled", (150, 150, 150)

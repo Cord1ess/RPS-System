@@ -1,38 +1,35 @@
-"""Evaluate page: Dextra model check (no training), compare recognition methods, results."""
+"""Evaluate page: score any of the four recognizers on recordings, side by side."""
 
 import json
 import os
-import re
 
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-                               QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QHeaderView, QLabel, QTableWidget, QTableWidgetItem,
+                               QVBoxLayout)
 
-from rps.cnn import list_models
+from rps.pipeline import RECOGNIZERS, missing_reason
 from rps.recorder import list_recordings
 from rps.ui.base import Tab
-from rps.ui.common import LogView, ProcessRunner, select_data
-from rps.ui.style import BAD, OK, WARN, Card, Collapsible, button, caption, label, page_header, row, tip
+from rps.ui.common import LogView, ProcessRunner
+from rps.ui.style import BAD, OK, Card, Collapsible, button, caption, page_header, row, tip
 
-COLUMNS = [("setting", "Setting", "str", "Only for comparisons: the value being compared."),
-           ("source", "Method", "str", "Which recognition method was replayed."),
-           ("show_hold_acc", "Held correct", "pct", "Share of time the decision matched the gesture held."),
-           ("show_switches_per_min", "Changes/min", "num", "Decision changes while one gesture was held. "
-                                                            "Should be about 0."),
-           ("show_cnn_frame_acc", "Motion model", "pct", "Motion model accuracy on single images."),
-           ("show_mp_frame_acc", "Hand tracker", "pct", "Hand tracker accuracy on single frames."),
-           ("throw_acc", "Throws correct", "pct", "Countdown throws where the decision was right."),
-           ("throw_commits", "Throws decided", "str", "Throws the system decided."),
-           ("throws_planned", "Throws recorded", "str", "Throws planned when recording."),
-           ("commit_vs_throw_ms", "Decided vs throw (ms)", "num", "Decision time relative to the throw: when "
-                                                                   "paper or scissors first shows, or when a rock "
-                                                                   "throw stops moving down. Negative = before."),
-           ("visible_ms", "Robot visible (ms)", "num", "Decision + camera delay + servo time. Target 200 or less."),
-           ("bg_false_commits_per_min", "False moves/min", "num", "Decisions made with no hand present.")]
-METHODS = [("mediapipe", "Hand tracker"), ("cnn", "Motion model"), ("fused", "Both")]
+# (result key, column title, format, hover)
+COLUMNS = [("source", "Model", "name", "Which recognizer was replayed."),
+           ("show_hold_acc", "Holding right", "pct", "'Hold one gesture' recordings: share of the time the decision "
+                                                     "was the gesture held."),
+           ("show_switches_per_min", "Changes/min", "num", "'Hold one gesture' recordings: decision changes per "
+                                                          "minute while one gesture was held. Should be about 0."),
+           ("throw_acc", "Throws right", "pct", "'Countdown throws' recordings: throws decided correctly."),
+           ("throw_commits", "Throws decided", "int", "Throws the system decided (compare with the throws "
+                                                      "recorded)."),
+           ("throws_planned", "Throws recorded", "int", "Throws planned when recording."),
+           ("commit_vs_throw_ms", "Decides after throw (ms)", "num", "How long after the throw showed the decision "
+                                                                     "came. Lower is faster."),
+           ("bg_false_commits_per_min", "No-hand moves/min", "num", "'No hand' recordings: decisions made with no "
+                                                                   "hand present. Should be 0.")]
 
 
 class EvaluateTab(Tab):
-    title = "5  Evaluate"
+    title = "6  Evaluate"
 
     def __init__(self, main):
         super().__init__(main)
@@ -41,100 +38,81 @@ class EvaluateTab(Tab):
         self.runner.line.connect(self._line)
         self.runner.finished.connect(self._done)
         self._job = ""
+        self._best = None
 
-        pick = Card("Recordings", "Which recordings to test on. Use a person the model did not learn from.")
+        pick = Card("Test on", "Which recordings to replay. Use a person the models did not learn from.")
         self.target = tip(QComboBox(), "Recordings used for the test.")
         pick.body.addWidget(self.target)
 
-        dextra = Card("Dextra model check", "Does Dextra's pretrained model recognise your gestures on this camera? "
-                                            "No training.")
-        self.transfer_btn = button("Run check", "primary", "Replays your 'Hold one gesture' and 'No hand' recordings "
-                                                           "through Dextra's model under every rotation, flip, "
-                                                           "movement-per-image and zoom, ranks the settings, and saves "
-                                                           "pictures of your images next to Dextra's (a few minutes).")
+        models = Card("Models", "Tick the models to compare. Each replays the recordings through exactly what Play "
+                                "runs.")
+        self.all_box = tip(QCheckBox("All"), "Tick or untick every available model.")
+        self.all_box.toggled.connect(self._all_toggled)
+        models.body.addWidget(self.all_box)
+        self.boxes = {}
+        for key, name in RECOGNIZERS.items():
+            cb = tip(QCheckBox(name), f"Score {name}.")
+            cb.toggled.connect(self._box_toggled)
+            self.boxes[key] = cb
+            models.body.addWidget(cb)
+        self.run_btn = button("Run", "primary", "Replay the recordings and score each ticked model (the first run "
+                                                "takes longer: Mediapipe's readings are stored for next time).")
+        self.run_btn.clicked.connect(self._run)
+        cancel = button("Cancel", tooltip="Stop the running job.")
+        cancel.clicked.connect(self.runner.kill)
+        models.body.addLayout(row(self.run_btn, cancel))
+
+        check = Card("Dextra Raw view check", "How well Dextra Raw (as downloaded) reads your gestures on this camera, "
+                                              "and which turn, mirror and movement setting suits it best.")
+        self.transfer_btn = button("Run check", tooltip="Replays your 'Hold one gesture' and 'No hand' recordings "
+                                                        "through Dextra Raw under every turn, mirror, movement per "
+                                                        "image and zoom, and ranks them (a few minutes).")
         self.transfer_btn.clicked.connect(self._transfer)
-        sheets = button("Open pictures", tooltip="Your motion images next to Dextra's, per gesture, for the best "
+        sheets = button("Open pictures", tooltip="Your Dextra views next to Dextra's own, per gesture, for the best "
                                                  "setting.")
         sheets.clicked.connect(self._open_sheets)
-        dextra.body.addLayout(row(self.transfer_btn, sheets))
+        check.body.addLayout(row(self.transfer_btn, sheets))
         self.transfer_result = caption("", "Best setting found by the last check.")
-        dextra.body.addWidget(self.transfer_result)
+        check.body.addWidget(self.transfer_result)
         self.apply_btn = button("Use this setting", tooltip="Apply the best turn, mirror, movement per image and "
-                                                            "motion sensitivity to Play. Save on Settings to keep it.")
+                                                            "movement sensitivity to Dextra Raw. Save on Settings to "
+                                                            "keep it.")
         self.apply_btn.clicked.connect(self._apply_best)
         self.apply_btn.setVisible(False)
-        dextra.body.addLayout(row(self.apply_btn))
-        self._best = None
+        check.body.addLayout(row(self.apply_btn))
 
-        compare = Card("Compare recognition methods", "Replays recordings through exactly what Play runs and "
-                                                       "scores each method.")
-        self.src = {}
-        boxes = []
-        for data, text in METHODS:
-            cb = tip(QCheckBox(text), f"Include '{text}' in the comparison.")
-            cb.setChecked(True)
-            self.src[data] = cb
-            boxes.append(cb)
-        compare.body.addLayout(row(*boxes))
-        self.model_pick = tip(QComboBox(), "Which motion model 'Motion model' and 'Both' use: Dextra as "
-                                           "downloaded, or Dextra tuned on your recordings. Run once with each to "
-                                           "compare them.")
-        mr = QHBoxLayout()
-        mr.addWidget(label("Motion model", self.model_pick.toolTip()))
-        mr.addWidget(self.model_pick, 1)
-        compare.body.addLayout(mr)
-        adv = QWidget()
-        ag = QGridLayout(adv)
-        ag.setContentsMargins(0, 0, 0, 0)
-        ag.setColumnStretch(1, 1)
-        self.overrides = tip(QLineEdit(), "Temporary setting changes for this run only, e.g. vote.k=3; "
-                                          "decision.still_frames=1")
-        self.overrides.setPlaceholderText("vote.k=3; decision.still_frames=1")
-        self.sweep = tip(QLineEdit(), "Run once per value and list the results side by side, e.g. vote.k=1,2,3")
-        self.sweep.setPlaceholderText("vote.k=1,2,3")
-        ag.addWidget(label("Temporary settings", self.overrides.toolTip()), 0, 0)
-        ag.addWidget(self.overrides, 0, 1)
-        ag.addWidget(label("Compare values", self.sweep.toolTip()), 1, 0)
-        ag.addWidget(self.sweep, 1, 1)
-        compare.body.addWidget(Collapsible("Settings to try", adv))
-        self.run_btn = button("Run comparison", "primary", "Replay the recordings and score each selected method.")
-        self.run_btn.clicked.connect(self._run)
-        cancel = button("Cancel", tooltip="Stop the running check or comparison.")
-        cancel.clicked.connect(self.runner.kill)
-        compare.body.addLayout(row(self.run_btn, cancel))
-
-        results = Card("Results", "Hover a column title for its meaning.")
+        results = Card("Results", "One row per model. Hover a column title for its meaning.")
         self.verdict = QLabel("Nothing run yet")
         self.verdict.setWordWrap(True)
         self.verdict.setStyleSheet("font-size:11pt; font-weight:600;")
-        tip(self.verdict, "Verdict: use both methods only if they beat the hand tracker alone on people the model "
-                          "did not learn from.")
+        tip(self.verdict, "The best model on these recordings: most throws right, then most time holding right, "
+                          "then fewest changes.")
         results.body.addWidget(self.verdict)
         self.table = QTableWidget(0, len(COLUMNS))
         self.table.setHorizontalHeaderLabels([c[1] for c in COLUMNS])
         for i, c in enumerate(COLUMNS):
             self.table.horizontalHeaderItem(i).setToolTip(c[3])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        tip(self.table, "One row per method (and per value when comparing settings). Hover a column title for "
-                        "its meaning.")
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        tip(self.table, "One row per model. Hover a column title for its meaning.")
         results.body.addWidget(self.table, 1)
-        self.output = Collapsible("Output", self.log, tooltip="Full output, including the complete ranking of the "
-                                                              "Dextra check.")
+        self.output = Collapsible("Output", self.log, tooltip="Full output of the last job.")
         results.body.addWidget(self.output)
 
         left = QVBoxLayout()
-        for w in (pick, dextra, compare):
+        for w in (pick, models):
             left.addWidget(w)
+        left.addWidget(Collapsible("Dextra Raw view check", check, tooltip="Only for Dextra Raw: find the camera "
+                                                                           "view setting that suits it."))
         left.addStretch(1)
         body = QHBoxLayout()
         body.addLayout(left, 2)
         body.addWidget(results, 3)
         page = QVBoxLayout(self)
-        page.addWidget(page_header("Evaluate", "Measure on recordings: does Dextra's model work here, and which "
-                                               "method plays best."))
+        page.addWidget(page_header("Evaluate", "Which model reads your hand best, measured on recordings."))
         page.addLayout(body, 1)
 
+    # ------------------------------------------------------------------ choices
     def on_activated(self):
         people = sorted({m.get("person", "") for m in list_recordings(self.state.recordings_root)} - {""})
         current = self.target.currentData()
@@ -145,19 +123,32 @@ class EvaluateTab(Tab):
         idx = self.target.findData(current)
         if idx >= 0:
             self.target.setCurrentIndex(idx)
-        current_model = self.model_pick.currentData() or self.state.cfg.cnn.model_path
-        self.model_pick.clear()
-        for m in list_models("models"):
-            self.model_pick.addItem(m["name"], m["path"])
-        if self.model_pick.count() == 0:
-            self.model_pick.addItem("None yet: 'Motion model' and 'Both' are skipped", "")
-        select_data(self.model_pick, current_model)
+        for key, cb in self.boxes.items():
+            why = missing_reason(self.state.cfg, key)
+            cb.setEnabled(why is None)
+            cb.setToolTip(why or f"Score {RECOGNIZERS[key]}.")
+            if why:
+                cb.setChecked(False)
+        if not any(cb.isChecked() for cb in self.boxes.values()):
+            self.all_box.setChecked(True)
+            self._all_toggled(True)
         if not people:
             self.verdict.setText("No recordings yet")
 
-    def _transfer_dir(self) -> str:
-        return os.path.join(self.state.analysis_root, "dextra_transfer")
+    def _all_toggled(self, on: bool):
+        for cb in self.boxes.values():
+            if cb.isEnabled():
+                cb.blockSignals(True)
+                cb.setChecked(on)
+                cb.blockSignals(False)
 
+    def _box_toggled(self, *_):
+        available = [cb for cb in self.boxes.values() if cb.isEnabled()]
+        self.all_box.blockSignals(True)
+        self.all_box.setChecked(bool(available) and all(cb.isChecked() for cb in available))
+        self.all_box.blockSignals(False)
+
+    # ------------------------------------------------------------------ jobs
     def _busy(self, job: str, text: str):
         self._job = job
         self.verdict.setText(text)
@@ -165,63 +156,106 @@ class EvaluateTab(Tab):
         self.run_btn.setEnabled(False)
         self.transfer_btn.setEnabled(False)
 
+    def _run(self):
+        if self.runner.running() or not self.target.currentData():
+            return
+        sources = [k for k, cb in self.boxes.items() if cb.isChecked() and cb.isEnabled()]
+        if not sources:
+            self.verdict.setText("Tick at least one model")
+            return
+        self.table.setRowCount(0)
+        self._best = None
+        self._busy("compare", "Running")
+        self.runner.start(["replay_eval.py", "--recordings", self.target.currentData(), "--config",
+                           self.state.run_config(), "--sources", ",".join(sources)])
+
+    def _transfer_dir(self) -> str:
+        return os.path.join(self.state.analysis_root, "dextra_transfer")
+
     def _transfer(self):
         if self.runner.running() or not self.target.currentData():
             return
         self.transfer_result.setText("")
         self.apply_btn.setVisible(False)
-        self._busy("transfer", "Dextra model check running")
-        self.runner.start(["tools/dextra_transfer.py", "--recordings", self.target.currentData(),
-                           "--config", self.state.run_config(), "--out", self._transfer_dir()])
+        self._busy("transfer", "Dextra Raw view check running")
+        self.runner.start(["tools/dextra_transfer.py", "--recordings", self.target.currentData(), "--model",
+                           self.state.cfg.cnn.raw_model, "--config", self.state.run_config(),
+                           "--out", self._transfer_dir()])
 
     def _open_sheets(self):
         path = self._transfer_dir()
         if os.path.isdir(path):
             os.startfile(os.path.abspath(path))
 
-    def _run(self):
-        if self.runner.running() or not self.target.currentData():
-            return
-        sources = [n for n, cb in self.src.items() if cb.isChecked()]
-        if not sources:
-            return
-        args = ["replay_eval.py", "--recordings", self.target.currentData(), "--config", self.state.run_config(),
-                "--sources", ",".join(sources)]
-        if self.model_pick.currentData():
-            args += ["--set", f"cnn.model_path={self.model_pick.currentData()}"]
-        for item in re.split(r"[;\n]+", self.overrides.text()):
-            if item.strip():
-                args += ["--set", item.strip()]
-        if self.sweep.text().strip():
-            args += ["--sweep", self.sweep.text().strip()]
-        self.table.setRowCount(0)
-        self._busy("compare", "Comparison running")
-        self.runner.start(args)
-
     def _line(self, line: str):
         if line.startswith("@@RESULT "):
             self._add_result(json.loads(line[len("@@RESULT "):]))
             return
-        self.log.log(line)
-        if line.startswith("GO/NO-GO:"):
-            text = line.split(":", 1)[1].strip()
-            if "ship FUSED" in text:
-                text, color = "Use both methods: they beat the hand tracker alone", OK
-            elif "no verdict" in text:
-                text, color = "No verdict: not enough recordings with decisions", WARN
-            else:
-                text, color = "Use the hand tracker alone: both methods together are not better", BAD
-            self.verdict.setText(text)
-            self.verdict.setStyleSheet(f"font-size:11pt; font-weight:600; color:{color};")
+        if line.startswith("@@SKIP "):
+            info = json.loads(line[len("@@SKIP "):])
+            self._add_row([RECOGNIZERS.get(info["source"], info["source"]), "not available"], info["reason"])
+            return
         if line.startswith("@@BEST "):
             self._show_best(json.loads(line[len("@@BEST "):]))
+            return
+        self.log.log(line)
+        if line.startswith("Best on these recordings:"):
+            self._best = line.split(":", 1)[1].strip()
 
+    def _done(self, code: int):
+        self.run_btn.setEnabled(True)
+        self.transfer_btn.setEnabled(True)
+        style = "font-size:11pt; font-weight:600;"
+        if self.runner.cancelled:
+            self.verdict.setText("Cancelled")
+            self.verdict.setStyleSheet(style)
+        elif code != 0:
+            self.verdict.setText("Stopped with an error: see Output")
+            self.verdict.setStyleSheet(style + f" color:{BAD};")
+            self.output.toggle.setChecked(True)
+        elif self._job == "transfer":
+            self.verdict.setText("Dextra Raw view check done: the best setting is on the left, the full ranking in "
+                                 "Output")
+            self.verdict.setStyleSheet(style)
+        elif self._best:
+            self.verdict.setText(f"Best on these recordings: {self._best}")
+            self.verdict.setStyleSheet(style + f" color:{OK};")
+        else:
+            self.verdict.setText("Done: no model decided anything on these recordings")
+            self.verdict.setStyleSheet(style)
+
+    def _add_row(self, texts, tooltip: str = ""):
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        for c, text in enumerate(texts):
+            item = QTableWidgetItem(text)
+            if tooltip:
+                item.setToolTip(tooltip)
+            self.table.setItem(r, c, item)
+
+    def _add_result(self, res: dict):
+        texts = []
+        for key, _name, kind, _tip in COLUMNS:
+            v = res.get(key)
+            if kind == "name":
+                texts.append(RECOGNIZERS.get(v, v))
+            elif v is None or v == "":
+                texts.append("-")
+            elif kind == "pct":
+                texts.append(f"{v * 100:.1f}%")
+            elif kind == "num":
+                texts.append(f"{v:.1f}")
+            else:
+                texts.append(str(v))
+        self._add_row(texts)
+
+    # ------------------------------------------------------------------ Dextra Raw view check result
     def _show_best(self, best: dict):
-        self._best = best
+        self._best_setting = best
         per = ", ".join(f"{g} {v * 100:.0f}%" for g, v in best["per_gesture"].items())
         text = (f"Best: turned {best['rotate']} degrees, {'mirrored' if best['flip'] else 'not mirrored'}, "
-                f"movement per image {best['event_count']}, motion sensitivity {best['contrast_threshold']:.2f}: "
-                f"{best['balanced'] * 100:.0f}% of motion images correct ({per}).")
+                f"movement per image {best['event_count']}, movement sensitivity {best['contrast_threshold']:.2f}: "
+                f"{best['balanced'] * 100:.0f}% of Dextra views correct ({per}).")
         if best.get("current_balanced") is not None:
             text += f" Current setting: {best['current_balanced'] * 100:.0f}%."
         if best["zoom"] != 1.0:
@@ -230,7 +264,7 @@ class EvaluateTab(Tab):
         self.apply_btn.setVisible(True)
 
     def _apply_best(self):
-        b, cfg = self._best, self.state.cfg
+        b, cfg = getattr(self, "_best_setting", None), self.state.cfg
         if not b:
             return
         cfg.cnn.rotate, cfg.cnn.flip = int(b["rotate"]), bool(b["flip"])
@@ -238,40 +272,6 @@ class EvaluateTab(Tab):
         self.state.mark_dirty()
         self.apply_btn.setVisible(False)
         self.transfer_result.setText(self.transfer_result.text() + " Applied; save on Settings to keep it.")
-
-    def _done(self, code: int):
-        self.run_btn.setEnabled(True)
-        self.transfer_btn.setEnabled(True)
-        if self.runner.cancelled:
-            self.verdict.setText("Cancelled")
-            self.verdict.setStyleSheet("font-size:11pt; font-weight:600;")
-        elif code != 0:
-            self.verdict.setText("Stopped with an error: see Output")
-            self.verdict.setStyleSheet(f"font-size:11pt; font-weight:600; color:{BAD};")
-            self.output.toggle.setChecked(True)
-        elif self._job == "transfer":
-            self.verdict.setText("Dextra model check done: best setting shown on the left, full ranking in Output")
-            self.output.toggle.setChecked(True)
-        elif self.verdict.text() == "Comparison running":
-            self.verdict.setText("Done. The verdict needs 'Hand tracker' and 'Both' selected.")
-
-    def _add_result(self, res: dict):
-        r = self.table.rowCount()
-        self.table.insertRow(r)
-        names = dict(METHODS)
-        for c, (key, _name, kind, _tip) in enumerate(COLUMNS):
-            v = res.get(key)
-            if key == "source":
-                text = names.get(v, v)
-            elif v is None or v == "":
-                text = "-"
-            elif kind == "pct":
-                text = f"{v * 100:.1f}%"
-            elif kind == "num":
-                text = f"{v:.1f}"
-            else:
-                text = str(v)
-            self.table.setItem(r, c, QTableWidgetItem(text))
 
     def shutdown(self):
         self.runner.kill()

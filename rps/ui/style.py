@@ -62,7 +62,7 @@ QCheckBox, QRadioButton {{ background:transparent; spacing:6px; }}
 QCheckBox::indicator {{ width:14px; height:14px; border:1px solid #5b636c; border-radius:3px; background:{RAISED}; }}
 QCheckBox::indicator:checked {{ background:{ACCENT}; border-color:{ACCENT}; image:url({CHECK_ICON}); }}
 QRadioButton::indicator {{ width:12px; height:12px; border:1px solid #5b636c; border-radius:7px; background:{RAISED}; }}
-QRadioButton::indicator:checked {{ background:{ACCENT}; border:3px solid {RAISED}; }}
+QRadioButton::indicator:checked {{ width:8px; height:8px; background:{ACCENT}; border:3px solid {RAISED}; }}   /* same 14 px outside as unchecked, so the label never moves */
 QStatusBar {{ color:{MUTED}; }}
 """
 

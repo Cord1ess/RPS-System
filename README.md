@@ -2,9 +2,9 @@
 
 A rock-paper-scissors robot hand (3D-printed, servo tendons, ESP32 over UDP) that sees your throw and plays the winning move fast enough to look simultaneous. The perception software copies the method of **Dextra** ([SensorsINI](https://sensors.ini.ch/research/projects/dextra)), but runs on an ordinary laptop webcam instead of a DVS event camera.
 
-- **Primary path:** a webcam **DVS emulator** that emits constant-event-count 64×64 frames only when something moves, feeding **RoshamboNet**, with a Dextra-style sequence vote.
-- **Fallback and still-hand authority:** **MediaPipe** hand landmarks with finger-curl rules.
-- **Game modes:** *countdown* ("rock, paper, scissors, shoot") and *continuous* (Dextra demo style), switchable live.
+- **Four ways to read the hand**, named the same everywhere: **Dextra Raw** (Dextra's model as downloaded), **Dextra Tuned** (Dextra tuned on your recordings), **Mediapipe** (finger positions) and **Both (Dextra Tuned + Mediapipe)**. Dextra reads the *Dextra view*: constant-event-count 64×64 frames from a webcam DVS emulator, made only when something moves, with a Dextra-style sequence vote.
+- **Pumps** are counted from the hand's height (the tracked wrist, carried through gaps by the play zone's motion) and adapt to each player's pump size and tempo.
+- **Game modes:** *countdown* (pump at your own pace), *beat guide* (a drum beat leads each round: pump on 3, 2, 1, throw on SHOOT) and *live* (Dextra demo style).
 
 > **Why v3?** The v2 system (removed; it is in the git history before this version) ran the CNN on every webcam frame. When your hand is still, the frame difference is blank, and blank frames were never in training, so the output jumped randomly. A real DVS produces *no frames* when nothing moves, so Dextra's last decision simply holds. v3 reproduces that behaviour and adds MediaPipe for the still hand.
 
@@ -16,7 +16,7 @@ A rock-paper-scissors robot hand (3D-printed, servo tendons, ESP32 over UDP) tha
 camera thread (latest frame, timestamped)
    │
    ▼  one decision thread, fixed order per frame
-ROI ─► PseudoDVS ─(frame only after N events)─► RoshamboNet ─► SequenceVote ─► decision ─► UDP → ESP32
+ROI ─► PseudoDVS ─(Dextra view after N events)─► Dextra ──► SequenceVote ─► decision ─► UDP → ESP32
    └─► MediaPipe HandLandmarker (same frame) ─► finger-curl rules ───────────► decision ─► UDP (if changed)
                                                                                  └─► HUD + latency log
 ```
@@ -24,11 +24,11 @@ ROI ─► PseudoDVS ─(frame only after N events)─► RoshamboNet ─► Seq
 | Stage | What it does |
 |---|---|
 | **PseudoDVS** ([rps/dvs_emulator.py](rps/dvs_emulator.py)) | Per-pixel log-intensity events against a reference level (contrast threshold C), as in v2e/ESIM. Global-gain correction absorbs auto-exposure drift, and a 3×3 filter removes noise. Events accumulate into a 64×64 histogram until **N = 1500** events, with binomial thinning on overshoot and clipping at **K = 16** (Dextra's normalization). A still scene emits nothing. |
-| **RoshamboNet** ([model.py](model.py)) | Unchanged 115k-parameter CNN (Dextra: ~120k). |
+| **Dextra** ([model.py](model.py), [rps/cnn.py](rps/cnn.py)) | Dextra's 5-layer network on the Dextra view: **Dextra Raw** as downloaded (98.75% on its own test images), **Dextra Tuned** with its last two layers tuned on your recordings ([train.py](train.py)). |
 | **Vote** ([rps/voting.py](rps/voting.py)) | Dextra's default "sequence" filter: k = 2 identical, confident predictions in a row, within 250 ms. |
-| **MediaPipe** ([rps/hand_tracker.py](rps/hand_tracker.py)) | 3D joint angles give finger curl, with two thresholds per finger (hysteresis). Rules: rock ≤ 1 finger extended, scissors = index + middle, paper ≥ 3. |
-| **Decision** ([rps/decision.py](rps/decision.py)) | The CNN leads while the hand moves. MediaPipe decides only when the hand box is still *and* the frame came after the last CNN commit. Background never changes the command. Countdown state machine: `IDLE → ARMED → SHOOT → HOLD`. |
-| **Robot link** ([rps/robot_link.py](rps/robot_link.py)) | ASCII UDP: send on change plus a 100 ms heartbeat, with acknowledgements for round-trip time. |
+| **Mediapipe** ([rps/hand_tracker.py](rps/hand_tracker.py)) | 3D joint angles give finger curl, with two thresholds per finger (hysteresis). Rules: rock ≤ 1 finger extended, scissors = index + middle (or the middle hidden behind the index), paper ≥ 3. |
+| **Decision** ([rps/decision.py](rps/decision.py)) | Both: Dextra leads while the hand moves; Mediapipe decides when the hand is still or when it steadily disagrees. Background never changes the command. Countdown and beat guide: `IDLE/ARMED → SHOOT → HOLD` per round; pumps from [rps/motion.py](rps/motion.py), beat timing from [rps/game.py](rps/game.py). |
+| **Robot link** ([rps/robot_link.py](rps/robot_link.py)) | ASCII UDP. Team firmware: `RPS:ROCK` / `RPS:PAPER` / `RPS:SCISSORS` once per move; reference firmware: send on change plus a 100 ms heartbeat, with acknowledgements. |
 
 ## Measured on the demo laptop
 
@@ -37,7 +37,7 @@ Huawei FLMH-XX, Core Ultra 5 125H, "FHD Camera" (USB UVC):
 | Item | Result |
 |---|---|
 | Camera | 30 fps maximum in every mode; uncompressed YUY2 reaches 30 fps only at 640×480 |
-| Dim room, auto exposure | Media Foundation: **30.1 fps** · DirectShow: 16.9 fps (auto-exposure slows the camera) |
+| Dim room, auto exposure | About **17 new images a second** either way: DirectShow 16.9 fps; Media Foundation reports 30 fps but sends ~42% of images twice (the copy ~2 ms after the original, measured on the 2026-09-27 night recordings). Auto exposure slows the camera; more light is the fix. The app and the probe skip the copies, so the frame rate shown is new images |
 | Locked exposure | DirectShow: 30–31 fps with no jitter, **but the image is black without strong light**. The camera has no gain control, and manual exposure pins gain at its minimum. |
 | Focus / depth | No focus control and no IR/depth sensor, so depth-from-focus is impossible (evaluated and rejected) |
 | DVS emulator | ~0.9 ms per frame |
@@ -69,15 +69,19 @@ One window covers the whole workflow. Visible text is kept short and numeric; ho
 
 | Page | What you do there |
 |---|---|
-| **1 Setup** | Start the camera and check frame rate, light and overexposure; **Auto-configure**; **Set play zone** by dragging on the video; test the robot connection. Manual camera settings and camera delay tests are folded away |
-| **2 Record** | Choose person, session type and gesture, press **Record** (3-second countdown). A live motion preview confirms movement is seen; the progress list shows which of the 7 sessions this person still needs |
-| **3 Dataset** | All recordings with totals and free disk space; **Build** training images; check labels with a grid of random samples per person and gesture |
-| **4 Train** | Start from **Dextra's model (tuned on your recordings, recommended)** or from nothing. Accuracy check (each person left out in turn), train and test on one person, or train on everyone; live accuracy curves and the expected accuracy on a new person |
-| **5 Evaluate** | **Dextra model check** (no training): ranks rotation, flip, movement per image and zoom, and saves your motion images next to Dextra's. **Compare recognition methods** on recordings, with a verdict |
-| **6 Play** | Choose what **reads your hand**: motion model (Dextra), hand tracker (MediaPipe) or both, and which **motion model**: Dextra as downloaded or Dextra tuned on your recordings. Top: the **Decision** the robot answers and which reader made it (**Read by**), Robot, Round, Tempo. Each reader has its own colour, used for its card on the right, its line in the delay graph and its label on the video: **violet = motion model**, **cyan = hand tracker** (with the finger points). The cards show each reader's raw answer; the Decision can differ from them for a moment because the game rules wait for agreement |
-| **Settings** | Every setting by section; tick "Show advanced settings" for fine-tuning. Save / Undo changes / Reset to defaults |
+| **1 Setup** | Start the camera and check frame rate, light and overexposure; **Auto-configure**; **Set play zone** by dragging on the video; camera delay tests. Manual camera settings are folded away |
+| **2 Bot tuning** | Everything about the robot: **real, simulated or off**, commands (team or reference firmware), address and port; **Test connection**; buttons that send **Rock**, **Paper** and **Scissors** one at a time (and Ready on the reference firmware), with a log; **Finger tuning**: a slider per servo channel (0 extended … 180 folded) that sends the team firmware's `ANGLE:<channel>,<angle>` and shows the robot's confirmation, plus Extend all / Fold all; the hand's move times |
+| **3 Record** | Choose person, session type and gesture, press **Record** (3-second countdown). A live Dextra view confirms movement is seen; the progress list shows which of the 7 sessions this person still needs |
+| **4 Dataset** | All recordings with totals and free disk space; **Build** training images (warns about sessions where the hand is rarely visible); check labels with a grid of random samples per person and gesture |
+| **5 Train** | **Tune Dextra** on your recordings: the result is **Dextra Tuned**. Accuracy check (each person left out in turn), tune and test on one person, or tune on everyone; live accuracy curves |
+| **6 Evaluate** | Tick **All** or any of Dextra Raw, Dextra Tuned, Mediapipe and Both, pick recordings, **Run**: one row per model (holding right, changes per minute, throws right, how fast after the throw, false moves with no hand) and the best named. The **Dextra Raw view check** (folded) finds the camera view that suits Dextra Raw |
+| **7 Play** | The demo. Scoreboard (Robot : You, round of 5, 10 or endless), a big count, the camera with each reader's answer, the delay graph and the Dextra view. Options: recognition, rounds, pumps, **beat guide** on/off and its sound (drum, wood block, beep), tempo, count-in, beats between rounds and sound delay; **Play a round** previews the beat without the camera. The steady-beat and count volumes stay adjustable during a match |
+| **Play Debug** | Every reading and rule, for tuning: decision, which reader made it, robot move, round, tempo; the Dextra and Mediapipe cards; turn/mirror and sensitivity while playing; the log |
+| **Settings** | Every other setting by section (the robot is on Bot tuning, the match on Play); tick "Show advanced settings" for fine-tuning. Save / Undo changes / Reset to defaults |
 
-**Countdown pumps adapt to the player.** Pumps are measured from the hand's up-and-down speed in the play zone (optical flow), so a lost hand track does not lose a pump. The app learns each player's tempo (only from the gaps between pumps of one round, never from the pause after a throw) and stroke size, and scales its thresholds to them. Once enough pumps are counted, an open hand (paper or scissors) is the throw, whichever beat it comes on, so players who throw on the 3rd or the 4th down stroke both work; rock is the stroke that stops instead of reversing. Movement in the first 0.3 s after a result is ignored and the next pump starts a new round. Checked on a real 45 s recording (tests/fixtures): all 28 throws decided once each, none during pumps.
+**Pumps adapt to the player.** A pump is a low point of the hand followed by a real rise: the hand's height comes from the tracked wrist when Mediapipe sees it and is carried through gaps by the play zone's motion, and the rise needed is a fraction of the player's own recent pumps, so small and large pumps both count (on a real 45 s recording: 57 of 57 pumps; the earlier speed-based counter caught 48 and counted throws as pumps). The tempo is learned only within a round. After a decision, the low point the hand reaches while finishing the throw is ignored, and the next pump starts the next round. An open hand after pumping is the throw, whichever beat it comes on; rock is a throw that lands and stays down. The same recording: all 28 throws decided once each, 2 pumps counted in each round (how that player plays).
+
+**Beat guide.** A steady beat keeps the tempo the whole match (with **Endless** rounds, until Stop); before each throw come louder hits (one per pump, shown as 3, 2, 1) and a double hit on **SHOOT**. Every sound has most of its energy above 250 Hz, because laptop speakers play almost nothing lower (a pure bass-drum beat would be silent on them); the steady beat and the count have separate volumes. The throw is read in a window around SHOOT (from 0.35 s before to 0.8 s after; later is a missed round, the player's point), so the robot does not depend on counting pumps at all. The sound, the on-screen count and the throw window all follow one start time; `game.audio_latency_ms` and the camera delay line them up.
 
 Heavy jobs (probe, build, train, evaluate, Dextra import) run the command-line scripts below as background processes and stream their output into the tab, so the app and the CLI always behave the same.
 
@@ -90,14 +94,14 @@ Heavy jobs (probe, build, train, evaluate, Dextra import) run the command-line s
 
 ### 1. Play right away with MediaPipe (no training needed)
 ```powershell
-python play.py --source mediapipe --mock-esp            # the mock ESP prints every pose it receives
+python play.py --recognizer mediapipe --mock-esp        # the simulated robot prints every pose it receives
 ```
 Keys: `q` quit · `m` switch countdown/continuous · `r` reset counters. The HUD shows the camera fps, stage latencies, the pseudo-DVS preview, raw CNN/MediaPipe readings, the state machine, and the ESP link.
 
 ### 2. Connect the hand (hardware team)
 1. Flash [firmware/esp32_rps_receiver/esp32_rps_receiver.ino](firmware/esp32_rps_receiver/esp32_rps_receiver.ino) (Arduino-ESP32 core + ESP32Servo) and calibrate `POSE_ANGLES`.
 2. Join the ESP's soft-AP `RPS-HAND` (password `rpsrobot123`); the ESP is at `192.168.4.1` (the default `robot.host`).
-3. `python play.py --source mediapipe`. The HUD should show `ESP: connected, rtt …`.
+3. `python play.py --recognizer mediapipe` (or Bot tuning's Test connection and command buttons).
 4. Measure camera latency: `python tools/latency_test.py --mode led`, then put the median into `latency.camera_latency_ms` (the app's Setup page does this for you).
 5. Measure servo time between every pair of poses and fill in `latency.servo_transition_ms`. Choose the READY (`N`) pose that minimises the worst case.
 
@@ -125,13 +129,13 @@ python train.py --val_person bob              # tunes Dextra's model -> models/d
 python train.py --start_from scratch --all    # a new network instead -> models/motion_cnn_v3.pth
 python replay_eval.py --recordings data/recordings/bob   # exact live pipeline on held-out recordings
 ```
-`replay_eval.py` compares **mediapipe / cnn / fused** on:
+`replay_eval.py` compares **Dextra Raw / Dextra Tuned / Mediapipe / Both** (`--sources dextra_raw,dextra_tuned,mediapipe,both`) on:
 - hold accuracy and switches per minute (show sessions);
-- throw accuracy, and commit time versus the throw (when paper/scissors first shows to the hand tracker, or when a rock throw stops moving down), the same reference for every method;
+- throw accuracy, and commit time versus the throw (when paper/scissors first shows to Mediapipe, or when a rock throw stops moving down), the same reference for every method;
 - false commits (background);
 - projected robot-visible time = commit + camera latency + servo transition.
 
-It ends with the **go/no-go rule**: if fused doesn't beat MediaPipe-only on held-out people, ship MediaPipe-only. Tune any setting without re-recording:
+It ends with the best model on those recordings (most throws right, then most time holding right). Check it on people the models did not learn from. Tune any setting without re-recording:
 ```powershell
 python replay_eval.py --recordings data/recordings/bob --sweep vote.k=1,2,3
 python replay_eval.py --recordings data/recordings/bob --set decision.still_frames=1
@@ -141,7 +145,7 @@ python replay_eval.py --recordings data/recordings/bob --set decision.still_fram
 ```powershell
 python tools/import_dextra.py        # downloads Dextra's weights -> models/dextra_roshambo.pth
 python tools/dextra_transfer.py --recordings data/recordings/alice   # best orientation/settings for this camera
-python play.py --source cnn --mode continuous --set cnn.flip=true --set dvs.event_count=5000
+python play.py --recognizer dextra_raw --mode continuous --set cnn.flip=true
 ```
 - The numpy weights are the complete model: Dextra's float exports (the SavedModel its own code runs, `roshambo.h5`, `modelroshambo.tf`) hold bit-identical values. The port scores 98.8% on ROSHAMBO17 test frames.
 - Dextra's camera sees the hand side-on with fingers pointing left. Which orientation matches ours is measured, not assumed: on the first recordings (one person, mirrored webcam) the best was **mirrored back, not turned**, with 5000 events per image (69% of single images correct vs 60% at the defaults); a 90° turn was not in the top 15.
@@ -149,10 +153,11 @@ python play.py --source cnn --mode continuous --set cnn.flip=true --set dvs.even
 - `cnn.flip` is on by default: the webcam view is mirrored for display, and Dextra reads the un-mirrored view better (60% to 67% of single images). A tuned model always uses the orientation it was tuned with.
 - Licensing: ROSHAMBO17 is CC BY-SA 4.0. The Dextra repository has no license file, so its weights are git-ignored here and not redistributed.
 
-### 5. Play fused
+### 5. Play
+In the app: **Play** for a match (beat guide optional), **Play Debug** to watch every reading. From the command line:
 ```powershell
-python play.py                                # fused, countdown mode, ESP at config address
-python play.py --mode continuous
+python play.py                                # the recognition, game and robot saved in config.json
+python play.py --recognizer both --mode continuous
 ```
 
 ---
@@ -161,12 +166,13 @@ python play.py --mode continuous
 
 | Mode | Behaviour |
 |---|---|
-| **countdown** (default) | `IDLE` → hand appears → `ARMED` (robot shows READY; pumps counted from vertical reversals) → after 3 pumps `SHOOT`, or earlier on an open hand after 2 → paper/scissors commit as soon as they are seen; **rock commits only after the final downstroke has landed**, because the pumping fist is also "rock" → `HOLD`: the robot keeps its move until the next round's first pump (movement in the first 0.3 s is ignored) or until the hand leaves. |
+| **countdown** | `IDLE` → hand appears → `ARMED` (robot shows READY; pumps counted from the hand's height) → after 3 pumps `SHOOT`, or earlier on an open hand → paper/scissors commit as soon as they are seen; **rock commits only after the final downstroke has landed**, because the pumping fist is also "rock" → `HOLD`: the robot keeps its move until the next round's first pump or until the hand leaves. |
+| **guided** (beat guide) | Rounds follow the beat: `ARMED` during the count-in (robot READY), `SHOOT` from 0.35 s before to 0.8 s after the SHOOT beat, `HOLD` while the result shows. Paper/scissors commit as soon as they show in the window; a hand still closed 0.3 s after SHOOT is rock; no readable throw is a missed round. |
 | **continuous** | The robot always shows the counter to the current decision and returns to READY after 1 s with no hand. Good for demos and debugging. |
 
 ## ESP32 protocol
 
-Set `robot.protocol` (Setup page: "Robot commands") to match the firmware on the hand. The pose sent is always what the **robot** shows; the counter logic stays on the PC.
+Set `robot.protocol` (Bot tuning page: "Robot commands") to match the firmware on the hand. The pose sent is always what the **robot** shows; the counter logic stays on the PC.
 
 **Team firmware (`rps_text`, default)**: address `192.168.0.126`, UDP port **4210**, one ASCII command per datagram:
 
@@ -176,7 +182,9 @@ Set `robot.protocol` (Setup page: "Robot commands") to match the firmware on the
 | Paper (all fingers extended) | `RPS:PAPER` |
 | Scissors (index and middle extended) | `RPS:SCISSORS` |
 
-Each command is sent once, when the robot's move changes (so once per countdown round, even if the move repeats). The firmware has no ready position and does not reply: while you pump, the hand keeps its last move; Play shows how many moves were sent instead of a reply time; the LED camera-delay test is not available (use the mirror test). Setup's "Test connection" sends `RPS:PAPER` once, so the hand should open.
+Each command is sent once, when the robot's move changes (so once per countdown round, even if the move repeats). The firmware has no ready position and does not reply: while you pump, the hand keeps its last move; Play shows how many moves were sent instead of a reply time; the LED camera-delay test is not available (use the mirror test). Bot tuning's "Test connection" sends `RPS:PAPER` once, so the hand should open; its Rock, Paper and Scissors buttons send each command on its own. While Bot tuning is open it keeps one connection, so every command (and finger angle) comes from the same port, as the team's own tool sends them; each click is sent at once, in order, and shown in the log with anything the robot sends back.
+
+Finger tuning (Bot tuning page) uses the one command this firmware answers, the same as the team's own tuning tool: `ANGLE:<channel>,<angle>`, with channel 0 = pinky + ring, 1 = index, 2 = middle + point and angle 0 (extended) to 180 (folded). The firmware sends a confirmation back to the sender; the page shows it, or "No confirmation" after 1.5 s (then check Windows Firewall). The last angle per channel is kept in `robot.finger_angles`.
 
 **Reference firmware (`ack`)**: [firmware/esp32_rps_receiver](firmware/esp32_rps_receiver/esp32_rps_receiver.ino), ASCII over UDP, port **4210**:
 
@@ -203,11 +211,16 @@ The Play page stops the game (robot to READY) when you leave the page or the cam
 | Setting | Default | Effect |
 |---|---|---|
 | `dvs.contrast_threshold` | 0.20 | Lower = more events and more noise |
-| `dvs.event_count` | 1500 | Events per CNN frame (Dextra DVS128 value) |
-| `vote.k` / `vote.min_confidence` | 2 / 0.70 | CNN predictions needed in a row / minimum confidence |
-| `decision.still_frames` | 2 | Frames of stillness before "settled" (rock commit ≈ 67 ms after landing) |
-| `decision.mp_stable_frames` | 3 | MediaPipe gesture must repeat this many frames |
-| `decision.pumps_before_shoot` | 3 | Countdown pumps before SHOOT |
+| `decision.recognizer` | both | `dextra_raw`, `dextra_tuned`, `mediapipe` or `both` (Dextra Tuned + Mediapipe) |
+| `decision.mode` | countdown | `countdown`, `guided` (beat guide) or `continuous` (live) |
+| `dvs.event_count` | 1500 | Movement per Dextra view (Dextra DVS128 value) |
+| `vote.k` / `vote.min_confidence` | 2 / 0.70 | Dextra answers needed in a row / minimum confidence |
+| `decision.mp_stable_ms` | 45 | Mediapipe gesture must hold this long (3 frames at 30 fps; a time, so it means the same at any frame rate) |
+| `decision.pumps_before_shoot` | 3 | Pumps before the throw (beat guide: the loud thumps before SHOOT) |
+| `decision.pump_min_rise` | 0.02 | Smallest rise that counts as a pump, as a share of the play zone (grows with the player's pumps) |
+| `game.rounds` / `game.beat_bpm` | 5 / 150 | Match length (0 = endless); beat guide tempo |
+| `game.sound` / `game.beat_volume` / `game.cue_volume` | drum / 0.6 / 1.0 | Beat sound; steady beat and count volumes |
+| `robot.mode` / `robot.protocol` | real / rps_text | Real, simulated or off; team or reference firmware |
 | `camera.lock_exposure` / `exposure` | false / −6 | Lock only with a lit play zone (see measurements) |
 
 ## Latency budget (target: robot pose visible ≤ ~200 ms after the human's throw, human perceptual latency per Dextra)
@@ -225,20 +238,21 @@ Final acceptance: film human and robot hands together in 240 fps phone slow-moti
 ## Project structure
 
 ```
-app.py               desktop control centre (PySide6): Setup, Record, Dataset, Train, Evaluate, Play, Settings
-play.py              live runtime (camera or --video replay, HUD, ESP link)
+app.py               desktop app (PySide6): Setup, Bot tuning, Record, Dataset, Train, Evaluate, Play, Play Debug, Settings
+play.py              live runtime without the app window (camera or --video replay, HUD, robot link)
 record_session.py    raw lossless session recorder (FFV1 + timestamps + meta)
 build_dataset.py     recordings -> pseudo-DVS frames (multi-N, frame-skip, MediaPipe labels)
-train.py             RoshamboNet training, split by person (--lopo / --val_person / --all)
-replay_eval.py       offline evaluation of the exact live pipeline + go/no-go
-model.py             RoshamboNet, Dextra's network, MajorityVote, counter moves
+train.py             tunes Dextra -> Dextra Tuned, split by person (--lopo / --val_person / --all)
+replay_eval.py       offline evaluation of the exact live pipeline, per recognizer
+model.py             Dextra's network (and RoshamboNet for train.py --start_from scratch), MajorityVote, counter moves
 config.json          all tunables (defaults in rps/config.py)
-rps/                 camera, dvs_emulator, cnn, hand_tracker, voting, decision, pipeline,
-                     robot_link, recorder, hud, timing, perf, config
-rps/ui/              desktop app: camera worker, tabs, shared widgets
+rps/                 camera, dvs_emulator, cnn, hand_tracker, motion (pumps), game (beat timing), voting,
+                     decision, pipeline, robot_link, recorder, hud, timing, perf, config
+rps/ui/              desktop app: camera worker, pages, play_base (shared by Play and Play Debug), sound
 tools/               camera_probe, latency_test, mock_esp, import_dextra, dextra_transfer
 firmware/            ESP32 reference receiver
-tests/               pytest suite (emulator, voting, rules, decision, protocol, pipeline, Dextra import, UI)
+tests/               pytest suite (emulator, pumps, beat guide, voting, rules, decision, protocol, pipeline,
+                     Dextra import and tuning, evaluation, UI); fixtures/ holds a real session's numbers
 ```
 
 ## Acknowledgements

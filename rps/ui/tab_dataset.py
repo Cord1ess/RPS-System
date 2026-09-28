@@ -44,7 +44,7 @@ def _table(headers, tooltips):
 
 
 class DatasetTab(Tab):
-    title = "3  Dataset"
+    title = "4  Dataset"
 
     def __init__(self, main):
         super().__init__(main)
@@ -76,9 +76,9 @@ class DatasetTab(Tab):
         recs.body.addLayout(row(*buttons))
 
         # --- build
-        build = Card("Build training images", "Convert every recording into the motion images the motion model "
-                                              "learns from. About a minute per person.")
-        self.use_mp = tip(QCheckBox("Check labels with the hand tracker"),
+        build = Card("Build training images", "Convert every recording into the Dextra views that Dextra Tuned "
+                                              "learns from (Train page). About a minute per person.")
+        self.use_mp = tip(QCheckBox("Check labels with Mediapipe"),
                           "Drops images where the hand clearly shows a different gesture than the session label, "
                           "and labels each throw. Recommended.")
         self.use_mp.setChecked(True)
@@ -95,7 +95,7 @@ class DatasetTab(Tab):
                                              "listed (Dextra used 500-2000).")
         self.event_counts.setEditable(True)
         self.event_counts.addItems(["750,1500,3000", "1500", "1500,3000"])
-        self.clean_conf = tip(QDoubleSpinBox(), "Drop an image only if the hand tracker is at least this sure it "
+        self.clean_conf = tip(QDoubleSpinBox(), "Drop an image only if Mediapipe is at least this sure it "
                                                 "shows a different gesture (0-1).")
         self.clean_conf.setRange(0.3, 1.0)
         self.clean_conf.setSingleStep(0.05)
@@ -106,7 +106,7 @@ class DatasetTab(Tab):
         self.lookahead.setSingleStep(0.05)
         self.lookahead.setValue(0.30)
         self.lookahead.setSuffix(" s")
-        for i, (name, w) in enumerate((("Movement per image", self.event_counts), ("Tracker certainty", self.clean_conf),
+        for i, (name, w) in enumerate((("Movement per image", self.event_counts), ("Mediapipe certainty", self.clean_conf),
                                        ("Throw look-ahead", self.lookahead))):
             ag.addWidget(label(name, w.toolTip()), i, 0)
             ag.addWidget(w, i, 1)

@@ -1,4 +1,4 @@
-"""Record page: session form, recording controls with live motion preview, per-person progress."""
+"""Record page: session form, recording controls with a live Dextra view, per-person progress."""
 
 import threading
 import time
@@ -27,7 +27,7 @@ DEFAULT_DURATION = {"show": 45.0, "throws": 45.0, "background": 45.0}
 
 
 class RecordTab(Tab):
-    title = "2  Record"
+    title = "3  Record"
     uses_camera = True
     record_done = Signal(object)      # (meta | "aborted" | "camera" | None, error) -> UI thread
 
@@ -106,7 +106,7 @@ class RecordTab(Tab):
         self.preview = QLabel()
         self.preview.setFixedSize(96, 96)
         self.preview.setStyleSheet(f"background:#000; border:1px solid {BORDER};")
-        tip(self.preview, "Motion image of the play zone. If it stays dark while you move, the light is too low.")
+        tip(self.preview, "Dextra view of the play zone. If it stays dark while you move, the light is too low.")
         pv.addWidget(self.preview)
         pv.addWidget(caption("Movement seen in the play zone"), 1)
         rec.body.addLayout(pv)

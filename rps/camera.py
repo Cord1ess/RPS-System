@@ -3,10 +3,15 @@ Frame sources for the v3 pipeline.
 
 - CameraSource: threaded webcam grabber with latest-frame semantics, locked exposure and
   white balance, and a perf_counter timestamp + frame id on every frame.
-- VideoFileSource: replays a recording made by record_session.py with its recorded timestamps.
+- VideoFileSource: replays a recording made by record_session.py with its recorded timestamps
+  (re-stamped on the perf_counter clock when replayed in real time, as the app does).
 - MockSource: synthetic moving-blob scene for tests and hardware-free smoke runs.
 
 Every source exposes `roi` = (x, y, size): the square play zone in its own frame coordinates.
+
+Driver repeats: some webcam drivers (seen with MSMF in low light) hand over each image twice, the
+copy ~2 ms after the original, so "30 fps" is really ~17 new images a second and every frame-count
+threshold (still frames, Mediapipe repeats) is met by copies. Both the webcam and replay skip them.
 """
 
 import csv
@@ -25,12 +30,19 @@ from rps.config import CameraConfig, RoiConfig
 Roi = Tuple[int, int, int]
 
 BACKENDS = {"dshow": cv2.CAP_DSHOW, "msmf": cv2.CAP_MSMF, "any": cv2.CAP_ANY}
+REPEAT_MAX_S = 0.02     # a byte-identical image this soon after the last is the driver's copy, not a new exposure
+
+
+def is_repeat(img: np.ndarray, t: float, prev: Optional[np.ndarray], prev_t: Optional[float]) -> bool:
+    """True for a driver's copy of the previous image. A covered lens still gives new (black) images at the
+    frame rate, so it is never mistaken for one."""
+    return prev is not None and t - prev_t < REPEAT_MAX_S and np.array_equal(img, prev)
 
 
 @dataclass
 class Frame:
     id: int
-    t: float            # capture time in seconds (perf_counter for live, recorded for replay)
+    t: float            # capture time in seconds (perf_counter for live and real-time replay, else recorded)
     bgr: np.ndarray
     live: bool = False  # True when t is on the perf_counter clock (webcam), so latencies can be measured
 
@@ -71,6 +83,7 @@ class CameraSource:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self.dropped_reads = 0
+        self.repeats = 0                # driver repeats skipped (see is_repeat)
 
     def open(self) -> "CameraSource":
         backend = BACKENDS.get(self.cfg.backend, cv2.CAP_ANY)
@@ -139,6 +152,7 @@ class CameraSource:
 
     def _loop(self):
         frame_id = 0
+        prev, prev_t = None, None
         while self._running:
             ok, img = self.cap.read()
             t = time.perf_counter()
@@ -146,6 +160,10 @@ class CameraSource:
                 self.dropped_reads += 1
                 time.sleep(0.005)
                 continue
+            if is_repeat(img, t, prev, prev_t):
+                self.repeats += 1
+                continue
+            prev, prev_t = img, t
             if self.cfg.mirror:
                 img = cv2.flip(img, 1)
             with self._cond:
@@ -201,6 +219,8 @@ class VideoFileSource:
         self.realtime = realtime
         self._idx = 0
         self._t0_wall = None
+        self._prev, self._prev_t = None, None
+        self.repeats = 0           # driver repeats skipped
 
     def __len__(self):
         return len(self.times)
@@ -209,19 +229,26 @@ class VideoFileSource:
         return self
 
     def read(self, timeout: float = 1.0) -> Optional[Frame]:
-        if self._idx >= len(self.times):
-            return None
-        if self.cap is not None:
-            ok, img = self.cap.read()
-            if not ok:
+        while True:                # skips the driver's repeats, as the webcam does live
+            if self._idx >= len(self.times):
                 return None
-        else:
-            img = cv2.imread(os.path.join(self.dir, self.meta["video_file"], self.png_files[self._idx]))
-        t = self.times[self._idx]
-        if self.realtime:
+            if self.cap is not None:
+                ok, img = self.cap.read()
+                if not ok:
+                    return None
+            else:
+                img = cv2.imread(os.path.join(self.dir, self.meta["video_file"], self.png_files[self._idx]))
+            t = self.times[self._idx]
+            if not is_repeat(img, t, self._prev, self._prev_t):
+                break
+            self.repeats += 1
+            self._idx += 1
+        self._prev, self._prev_t = img, t
+        if self.realtime:          # paced like a camera and stamped on its clock (perf_counter), as the beat is
             if self._t0_wall is None:
                 self._t0_wall = time.perf_counter() - t
-            delay = self._t0_wall + t - time.perf_counter()
+            t = self._t0_wall + t
+            delay = t - time.perf_counter()
             if delay > 0:
                 time.sleep(delay)
         frame = Frame(self._idx, t, img)
@@ -257,14 +284,15 @@ class MockSource:
 
     def read(self, timeout: float = 1.0) -> Optional[Frame]:
         t = self._idx / self.fps
-        if self.realtime:
-            target = self._t0 + t
-            delay = target - time.perf_counter()
+        scene_t = t
+        if self.realtime:          # stamped on the camera clock (perf_counter), as a webcam frame is
+            t = self._t0 + scene_t
+            delay = t - time.perf_counter()
             if delay > 0:
                 time.sleep(delay)
         img = cv2.cvtColor(self.background, cv2.COLOR_GRAY2BGR)
         x, y, size = self.roi
-        cycle = t % 4.0
+        cycle = scene_t % 4.0
         # 0-2 s: pump (1.5 Hz vertical motion), 2-4 s: hold still
         offset = 0.18 * size * np.sin(2 * np.pi * 1.5 * cycle) if cycle < 2.0 else 0.0
         cx, cy = x + size // 2, int(y + size // 2 + offset)

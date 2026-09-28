@@ -1,21 +1,20 @@
 """
-Offline evaluation of the full live pipeline (rps.pipeline.Pipeline) on recorded sessions.
+Offline evaluation of the live pipeline (rps.pipeline.Pipeline) on recorded sessions.
 
-Each recording is replayed with its recorded timestamps through exactly the code play.py runs.
-Sessions are scored by type:
-    show        continuous mode: hold accuracy (fraction of time the committed gesture is the
-                session label), switches per minute (should be ~0), per-frame CNN/MediaPipe accuracy
-    throws      countdown mode: throw accuracy (commits == label), commits vs planned throws,
-                commit time relative to the hand coming to rest (negative = anticipated), and the
-                projected time the robot pose is visible = that + camera latency + servo transition
-    background  continuous mode: false commits per minute
+Each recording is replayed with its recorded timestamps through exactly the code Play runs, once
+per recognizer (dextra_raw, dextra_tuned, mediapipe, both). Sessions are scored by type:
+    show        live mode: how much of the time the decision was the gesture held, decision
+                changes per minute (should be ~0), and single-image accuracy of each reader
+    throws      countdown mode: throws decided correctly, decisions vs throws planned, and how long
+                after the throw showed the decision came (same reference for every recognizer)
+    background  live mode: false moves per minute
 
-Sources compared: mediapipe, cnn, fused. The report ends with the go/no-go rule from the plan:
-if fused does not beat MediaPipe-only on held-out people, ship MediaPipe-only.
+A recognizer whose model file is missing is skipped with a note. Mediapipe's readings of a
+recording are stored next to it (mp_replay_<settings>.pkl), so repeat runs are fast.
 
 Usage:
     python replay_eval.py --recordings data/recordings/bob          # held-out person
-    python replay_eval.py --recordings data/recordings --sources mediapipe
+    python replay_eval.py --recordings data/recordings --sources mediapipe,dextra_tuned
     python replay_eval.py --recordings data/recordings/bob --sweep vote.k=1,2,3
 """
 
@@ -25,6 +24,7 @@ import csv
 import glob
 import json
 import os
+import pickle
 from dataclasses import asdict
 from typing import Dict, List, Optional
 
@@ -33,9 +33,9 @@ import numpy as np
 from model import SYMBOL_TO_LABEL
 from rps.camera import VideoFileSource
 from rps.config import apply_overrides, load_config
-from rps.hand_tracker import PAPER, SCISSORS
+from rps.hand_tracker import PAPER, SCISSORS, tracker_fingerprint
 from rps.perf import boost_process
-from rps.pipeline import Pipeline
+from rps.pipeline import RECOGNIZERS, Pipeline, missing_reason, recognizer_parts
 
 LAND_BEFORE_S, LAND_AFTER_S = 1.5, 0.4     # where to look for the throw's landing around a decision
 LAND_PEAK_FRAMES = 3                      # a wrist low point must be the lowest within this many frames
@@ -60,6 +60,14 @@ def find_recordings(root: str) -> List[str]:
 
 
 def track_hand(rec_dir: str, cfg) -> ReplayHand:
+    """Mediapipe on every frame of a recording, stored next to it for the same hand settings."""
+    cache = os.path.join(rec_dir, f"mp_replay_{tracker_fingerprint(cfg.hand)}.pkl")
+    if os.path.exists(cache):
+        try:
+            with open(cache, "rb") as f:
+                return ReplayHand(pickle.load(f))
+        except Exception:                        # damaged or from another version: measure again
+            pass
     from rps.hand_tracker import HandTracker
     tracker = HandTracker(cfg.hand)
     src = VideoFileSource(rec_dir)
@@ -71,6 +79,11 @@ def track_hand(rec_dir: str, cfg) -> ReplayHand:
         obs[frame.t] = tracker.process(frame.bgr, src.roi, frame.t, allow_skip=False)
     src.stop()
     tracker.close()
+    try:
+        with open(cache, "wb") as f:
+            pickle.dump(obs, f)
+    except OSError:
+        pass
     return ReplayHand(obs)
 
 
@@ -242,63 +255,58 @@ def fmt(v, pct=False, digits=1):
 
 
 def print_table(results: Dict[str, Dict]):
-    cols = [("show_hold_acc", "hold acc", True), ("show_switches_per_min", "switch/min", False),
-            ("show_cnn_frame_acc", "cnn frame", True), ("show_mp_frame_acc", "mp frame", True),
-            ("throw_acc", "throw acc", True), ("throw_commits", "commits", False),
-            ("throws_planned", "planned", False), ("commit_vs_throw_ms", "commit-throw ms", False),
-            ("visible_ms", "visible ms", False), ("bg_false_commits_per_min", "bg false/min", False)]
-    print(f"{'source':<22}" + "".join(f"{name:>15}" for _, name, _ in cols))
+    cols = [("show_hold_acc", "holding", True), ("show_switches_per_min", "changes/min", False),
+            ("throw_acc", "throws right", True), ("throw_commits", "decided", False),
+            ("throws_planned", "planned", False), ("commit_vs_throw_ms", "ms after throw", False),
+            ("bg_false_commits_per_min", "no-hand moves/min", False)]
+    print(f"{'recognizer':<34}" + "".join(f"{name:>18}" for _, name, _ in cols))
     for source, agg in results.items():
-        print(f"{source:<22}" + "".join(f"{fmt(agg[k], pct):>15}" for k, _, pct in cols))
+        print(f"{RECOGNIZERS.get(source, source):<34}" + "".join(f"{fmt(agg[k], pct):>18}" for k, _, pct in cols))
 
 
-def go_no_go(results: Dict[str, Dict]):
-    fused, mp = results.get("fused"), results.get("mediapipe")
-    if not fused or not mp:
-        return
-    evaluable = any(fused[k] is not None and mp[k] is not None
-                    for k in ("throw_acc", "show_hold_acc", "visible_ms"))
-    if not evaluable or (not fused["throw_commits"] and not mp["throw_commits"]
-                         and not fused["show_hold_acc"] and not mp["show_hold_acc"]):
-        print("\nGO/NO-GO: not enough evaluable sessions (need held-out show/throws recordings "
-              "with commits) - no verdict.")
-        return
-
-    def better_or_equal(a, b, higher=True, tol=0.0):
-        if a is None or b is None:
-            return True
-        return a >= b - tol if higher else a <= b + tol
-    ok = (better_or_equal(fused["throw_acc"], mp["throw_acc"]) and
-          better_or_equal(fused["show_hold_acc"], mp["show_hold_acc"], tol=0.01) and
-          better_or_equal(fused["show_switches_per_min"], mp["show_switches_per_min"], higher=False, tol=0.5) and
-          better_or_equal(fused["visible_ms"], mp["visible_ms"], higher=False))
-    print("\nGO/NO-GO: " + ("fused pipeline beats MediaPipe-only -> ship FUSED" if ok else
-                            "fused does NOT beat MediaPipe-only on held-out data -> ship MEDIAPIPE-ONLY"))
+def best_recognizer(results: Dict[str, Dict]) -> Optional[str]:
+    """Most throws right, then most time holding right, then fewest changes."""
+    scored = [(s, r) for s, r in results.items() if r["throw_acc"] is not None or r["show_hold_acc"] is not None]
+    if not scored:
+        return None
+    return max(scored, key=lambda sr: (sr[1]["throw_acc"] or 0.0, sr[1]["show_hold_acc"] or 0.0,
+                                       -(sr[1]["show_switches_per_min"] or 0.0)))[0]
 
 
 def hand_for(rec_dir: str, cfg, hand_cache: Dict) -> ReplayHand:
-    """Hand-tracker results per recording, cached per hand-tracker setting (sweeps may change them)."""
+    """Mediapipe results per recording, kept per hand setting (a sweep may change them)."""
     key = (rec_dir, json.dumps(asdict(cfg.hand), sort_keys=True))
     if key not in hand_cache:
         hand_cache[key] = track_hand(rec_dir, cfg)
     return hand_cache[key]
 
 
-def evaluate(recordings, cfg, sources, cnn, hand_cache, csv_rows=None, tag="") -> Dict[str, Dict]:
+def load_dextra(path: str, cfg, cache: Dict):
+    if path not in cache:
+        from rps.cnn import GestureCNN
+        cache[path] = GestureCNN(path, cfg.cnn.threads, cfg.cnn.rotate, cfg.cnn.flip)
+        for w in cache[path].check_dvs(cfg.dvs):
+            print(f"[replay] Note: {w}")
+    return cache[path]
+
+
+def evaluate(recordings, cfg, sources, hand_cache, dextra_cache, csv_rows=None, tag="") -> Dict[str, Dict]:
     results = {}
     for source in sources:
+        model, use_mp = recognizer_parts(cfg, source)
+        cnn = load_dextra(model, cfg, dextra_cache) if model else None
         scores = []
         for rec_dir in recordings:
             with open(os.path.join(rec_dir, "meta.json"), "r", encoding="utf-8") as f:
                 meta = json.load(f)
-            hand = hand_for(rec_dir, cfg, hand_cache) if source in ("fused", "mediapipe") else None
-            res = replay(rec_dir, meta, cfg, cnn if source in ("fused", "cnn") else None, hand)
+            hand = hand_for(rec_dir, cfg, hand_cache) if use_mp else None
+            res = replay(rec_dir, meta, cfg, cnn, hand)
             ref = hand
-            if ref is None and meta["type"] == "throws":      # same timing reference for every method
+            if ref is None and meta["type"] == "throws":      # same timing reference for every recognizer
                 try:
                     ref = hand_for(rec_dir, cfg, hand_cache)
-                except Exception as e:                       # hand tracker unavailable: motion-based timing
-                    print(f"[replay] hand tracker unavailable for timing ({e}); using motion only")
+                except Exception as e:                       # Mediapipe unavailable: motion-based timing
+                    print(f"[replay] Mediapipe unavailable for timing ({e}); using motion only")
             add_reference(res["rows"], ref)
             s = score(meta, res, cfg)
             scores.append(s)
@@ -316,7 +324,8 @@ def main():
     parser.add_argument("--recordings", default="data/recordings")
     parser.add_argument("--config", default="config.json")
     parser.add_argument("--set", action="append", default=[], metavar="SECTION.KEY=VALUE")
-    parser.add_argument("--sources", default="mediapipe,cnn,fused")
+    parser.add_argument("--sources", default=",".join(RECOGNIZERS),
+                        help="Recognizers to score: " + ", ".join(RECOGNIZERS))
     parser.add_argument("--sweep", default=None, metavar="SECTION.KEY=V1,V2,...")
     parser.add_argument("--csv", default=None, help="Write per-recording scores here")
     args = parser.parse_args()
@@ -326,20 +335,21 @@ def main():
     recordings = find_recordings(args.recordings)
     if not recordings:
         raise SystemExit(f"No recordings under {args.recordings}")
-    sources = [s for s in args.sources.split(",") if s]
-    cnn = None
-    if any(s in ("fused", "cnn") for s in sources):
-        if os.path.exists(cfg.cnn.model_path):
-            from rps.cnn import GestureCNN
-            cnn = GestureCNN(cfg.cnn.model_path, cfg.cnn.threads, cfg.cnn.rotate, cfg.cnn.flip)
-            for w in cnn.check_dvs(cfg.dvs):
-                print(f"[replay] WARNING: {w}")
-        else:
-            print(f"[replay] No motion model file at {cfg.cnn.model_path}: scoring the hand tracker only.")
-            sources = [s for s in sources if s == "mediapipe"]
-    print(f"[replay] {len(recordings)} recordings, sources {sources}")
+    sources = []
+    for s in (x for x in args.sources.split(",") if x):
+        if s not in RECOGNIZERS:
+            raise SystemExit(f"Unknown recognizer '{s}'; choose from {', '.join(RECOGNIZERS)}")
+        why = missing_reason(cfg, s)
+        if why:                                   # ("both" without Dextra Tuned would just be Mediapipe)
+            print(f"[replay] Skipping {RECOGNIZERS[s]}: {why}")
+            print("@@SKIP " + json.dumps({"source": s, "reason": why}), flush=True)
+            continue
+        sources.append(s)
+    if not sources:
+        raise SystemExit("Nothing to score.")
+    print(f"[replay] {len(recordings)} recordings; scoring {', '.join(RECOGNIZERS[s] for s in sources)}")
 
-    hand_cache, csv_rows = {}, []
+    hand_cache, dextra_cache, csv_rows = {}, {}, []
     if args.sweep:
         path, values = args.sweep.split("=", 1)
         section, key = path.split(".", 1)
@@ -347,12 +357,14 @@ def main():
             cfg_v = copy.deepcopy(cfg)
             apply_overrides(cfg_v, {section: {key: value}})
             print(f"\n=== {path} = {value} ===")
-            print_table(evaluate(recordings, cfg_v, sources, cnn, hand_cache, csv_rows, tag=f"{path}={value}"))
+            print_table(evaluate(recordings, cfg_v, sources, hand_cache, {}, csv_rows, tag=f"{path}={value}"))
     else:
-        results = evaluate(recordings, cfg, sources, cnn, hand_cache, csv_rows)
+        results = evaluate(recordings, cfg, sources, hand_cache, dextra_cache, csv_rows)
         print()
         print_table(results)
-        go_no_go(results)
+        best = best_recognizer(results)
+        if best:
+            print(f"\nBest on these recordings: {RECOGNIZERS[best]}")
 
     if args.csv and csv_rows:
         keys = sorted({k for row in csv_rows for k in row})

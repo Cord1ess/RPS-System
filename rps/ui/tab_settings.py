@@ -10,7 +10,10 @@ from rps.ui.common import ConfigForm
 from rps.ui.fields import SECTION_INFO
 from rps.ui.style import Card, button, page_header
 
-ORDER = ["camera", "robot", "decision", "vote", "dvs", "cnn", "roi", "hand", "latency"]
+ORDER = ["camera", "decision", "vote", "dvs", "cnn", "roi", "hand", "latency"]
+# Chosen on their own pages, so not repeated here: the robot and its move times (Bot tuning), the match
+# and the recognition and game choices (Play and Play Debug).
+SKIP = {"decision": {"recognizer", "mode"}, "latency": {"servo_transition_ms"}}
 
 
 class SettingsTab(Tab):
@@ -39,7 +42,8 @@ class SettingsTab(Tab):
         for section in [s for s in ORDER if s in names]:
             title, text = SECTION_INFO.get(section, (section, ""))
             card = Card(title, text)
-            form = ConfigForm(self.state, section, show_advanced=False)
+            keys = [f.name for f in fields(getattr(self.state.cfg, section)) if f.name not in SKIP.get(section, ())]
+            form = ConfigForm(self.state, section, keys=keys, show_advanced=False)
             card.body.addWidget(form)
             self.cards.append((card, form))
         host = QWidget()
@@ -53,8 +57,8 @@ class SettingsTab(Tab):
         scroll.setWidget(host)
 
         page = QVBoxLayout(self)
-        page.addWidget(page_header("Settings", "Saved in config.json and used by the whole app. Hover any "
-                                               "setting for what it does."))
+        page.addWidget(page_header("Settings", "Saved in config.json and used by the whole app. The robot is on "
+                                               "Bot tuning; the match on Play. Hover any setting for what it does."))
         page.addLayout(top)
         page.addWidget(scroll, 1)
         self._layout_cards(False)

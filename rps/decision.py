@@ -1,24 +1,26 @@
 """
-Decision engine: fuses motion-model (CNN) and hand-tracker (MediaPipe) evidence and runs the game.
+Decision engine: fuses Dextra (the CNN on the motion image) and Mediapipe evidence and runs the game.
 
 Pure logic, no I/O: the pipeline feeds it per-frame observations in a fixed order
-(on_motion first, so the CNN path is never delayed; then on_hand for the same frame).
+(on_motion first, so Dextra is never delayed; then on_hand for the same frame).
 Both calls return the new robot pose ("R", "P", "S" or "N" = ready) when it changes, else None.
 
-Fusion rules
-- While the hand moves the CNN is the authority: a vote commit switches immediately.
-- The hand tracker decides only when the hand is still (few events in its box) and after the last
-  CNN decision plus a margin, so a late, blurred mid-throw fist cannot overwrite a correct commit.
-- Hysteresis (dead time) applies to tracker-driven switches and to A->B->A flips only.
+Fusion rules ("Both")
+- While the hand moves Dextra is the authority: a vote commit switches immediately.
+- Mediapipe decides only when the hand is still (few events in its box) and after the last
+  Dextra decision plus a margin, so a late, blurred mid-throw fist cannot overwrite a correct commit.
+- A steady Mediapipe reading that contradicts a Dextra vote blocks it.
+- Hysteresis (dead time) applies to Mediapipe-driven switches and to A->B->A flips only.
 - A background vote never changes the command (Dextra behaviour).
 
 Game modes
 - continuous: the robot always shows the counter to the current decision.
 - countdown: IDLE -> ARMED (count pumps) -> SHOOT -> HOLD. Pumps come from rps.motion's
-  RhythmPumpDetector, which learns the player's tempo. The throw is the stroke that lands (stops)
-  instead of reversing; one missed pump is tolerated when the landing comes on the beat.
-  Paper/scissors commit as soon as they are seen; rock (the pumping fist) only once the throw has
-  landed.
+  PumpDetector, which learns the player's pump size and tempo. An open hand after enough pumps is
+  the throw; rock (the pumping fist) commits once the throw has landed.
+- guided: the beat guide (rps.game.BeatSchedule) sets when each round's throw is due. ARMED during
+  the count-in, SHOOT in a window around the throw beat, HOLD after it; a window that closes
+  without a decision is a missed round.
 """
 
 from dataclasses import dataclass
@@ -27,7 +29,7 @@ from typing import Optional, Tuple
 from model import COUNTER_MOVES
 from rps.config import DecisionConfig, VoteConfig
 from rps.hand_tracker import BACKGROUND, PAPER, ROCK, SCISSORS, HandObs
-from rps.motion import RhythmPumpDetector
+from rps.motion import PumpDetector
 from rps.voting import make_voter
 
 READY = "N"
@@ -36,7 +38,8 @@ COUNTER_POSE = {g: POSE_LETTER[COUNTER_MOVES[g]] for g in (ROCK, PAPER, SCISSORS
 GESTURE_NAME = {ROCK: "rock", PAPER: "paper", SCISSORS: "scissors", BACKGROUND: "background", -1: "unknown"}
 
 IDLE, ARMED, SHOOT, HOLD = "IDLE", "ARMED", "SHOOT", "HOLD"
-TRACKER_FRESH_S = 0.1    # a hand-tracker reading older than this cannot block the motion model
+TRACKER_FRESH_S = 0.1    # a Mediapipe reading older than this cannot block a Dextra vote
+SETTLE_MIN_S = 0.45      # after a decision, low points this soon (or within 1.2 beats) are the throw settling
 
 
 @dataclass
@@ -64,6 +67,9 @@ class Snapshot:
     mp_gesture: Optional[int] = None
     reason: str = ""
     tempo: Optional[float] = None               # learned seconds per pump
+    round: int = -1                             # guided: the round being played
+    round_results: Optional[dict] = None        # guided: round -> gesture, or None when no throw was seen
+    misses: int = 0                             # countdown: rounds that ended without a decision
 
 
 class DecisionEngine:
@@ -72,10 +78,17 @@ class DecisionEngine:
         self.use_cnn = use_cnn
         self.use_mp = use_mp
         self.voter = make_voter(vote_cfg)
-        self.pump = RhythmPumpDetector(cfg.pump_min_amplitude, min_period_s=cfg.pump_min_period_s)
-        self.pump_from_mp = use_mp and cfg.pump_source == "mp"
-        self._wrist = None                      # (t, y) for wrist velocity when pump_source == "mp"
+        self.pump = PumpDetector(cfg.pump_min_rise, min_period_s=cfg.pump_min_period_s)
+        self._vy: Optional[float] = None        # this frame's vertical motion, for the pump detector
         self.mode = cfg.mode
+        # guided mode (beat guide): rps.game.BeatSchedule, and the delay from a beat being played to
+        # the player's throw on it reaching a camera frame (sound output + camera)
+        self.schedule = None
+        self.sync_offset_s = 0.0
+        self.round = -1
+        self.round_results = {}                 # round -> gesture decided, or None when no throw was seen
+        self.window_open_t = -1e9
+        self.misses = 0                         # countdown rounds that ended without a decision
         self.pose = READY
         self.human: Optional[int] = None
         self.prev_human: Optional[int] = None
@@ -95,7 +108,7 @@ class DecisionEngine:
         self.last_vote_t = -1e9
         self.cnn_rock_t = -1e9
         self.mp_gesture: Optional[int] = None
-        self.mp_count = 0
+        self.mp_since_t = self.mp_last_t = -1e9      # first and latest image of the current Mediapipe gesture
         self.last_hand_t = -1e9
         self.mp_present = False
         # countdown
@@ -117,13 +130,21 @@ class DecisionEngine:
         self.reason = f"mode -> {mode}"
         return self._set_pose(READY)
 
+    def start_guided(self, schedule, sync_offset_s: float = 0.0) -> Optional[str]:
+        """Plays rounds on the beats of `schedule` (rps.game.BeatSchedule)."""
+        self.schedule, self.sync_offset_s = schedule, sync_offset_s
+        self.round, self.round_results = -1, {}
+        return self.set_mode("guided")
+
     def snapshot(self) -> Snapshot:
-        return Snapshot(self.mode, self.state if self.mode == "countdown" else "LIVE", self.pose, self.human,
+        return Snapshot(self.mode, "LIVE" if self.mode == "continuous" else self.state, self.pose, self.human,
                         self.last_source, self.motion_active, self.pumps, self.switches, self.commits,
-                        self.cnn_vote, self.mp_gesture, self.reason, self.pump.tempo)
+                        self.cnn_vote, self.mp_gesture, self.reason, self.pump.tempo, self.round,
+                        dict(self.round_results), self.misses)
 
     def on_motion(self, obs: MotionObs) -> Optional[str]:
         t = obs.t
+        self._vy = obs.vy
         self._update_motion(obs)
         vote = None
         if obs.cnn is not None and self.use_cnn:
@@ -139,20 +160,27 @@ class DecisionEngine:
             if vote in (ROCK, PAPER, SCISSORS):
                 return self._commit(vote, "cnn", t)
             return self._continuous_idle(t)
-        event = None if self.pump_from_mp else self.pump.update(t, obs.vy)
-        return self._countdown(t, event, vote)
+        # with Mediapipe the pump detector runs in on_hand, where this frame's wrist height is known
+        event = None if self.use_mp else self.pump.update(t, obs.vy)
+        return self._rounds(t, event, vote)
 
     def on_hand(self, t: float, hand: Optional[HandObs], events_in_hand: Optional[int]) -> Optional[str]:
-        if hand is None or hand.skipped or not self.use_mp:
+        if hand is None or not self.use_mp:
             return None
+        if hand.skipped:                        # Mediapipe skipped this frame: motion alone carries the pumps
+            if self.mode == "continuous":
+                return None
+            return self._rounds(t, self.pump.update(t, self._vy), None)
         self._update_mp(t, hand)
         eligible = self._mp_eligible(t, events_in_hand)
         if self.mode == "continuous":
             if eligible:
                 return self._commit(self.mp_gesture, "mp", t)
             return self._continuous_idle(t)
-        event = self.pump.update(t, self._wrist_velocity(t, hand)) if self.pump_from_mp else None
-        out = self._countdown(t, event, None)
+        event = self.pump.update(t, self._vy, hand.wrist_y if hand.present else None)
+        out = self._rounds(t, event, None)
+        if self.mode != "countdown":
+            return out
         if out is None and self.state == HOLD and self.cfg.correction_s > 0 and eligible \
                 and t - self.commit_t <= self.cfg.correction_s and self.mp_gesture != self.human:
             out = self._commit(self.mp_gesture, "mp", t, force=True)
@@ -176,22 +204,15 @@ class DecisionEngine:
             self.last_hand_t = t
         g = hand.gesture if hand.present and hand.confidence >= self.cfg.mp_min_confidence else None
         if g is not None and g in (ROCK, PAPER, SCISSORS):
-            self.mp_count = self.mp_count + 1 if g == self.mp_gesture else 1
-            self.mp_gesture = g
+            if g != self.mp_gesture:
+                self.mp_since_t = t
+            self.mp_gesture, self.mp_last_t = g, t
         else:
-            self.mp_gesture, self.mp_count = None, 0
-
-    def _wrist_velocity(self, t: float, hand: HandObs) -> Optional[float]:
-        if not hand.present or hand.wrist_y is None:
-            self._wrist = None
-            return None
-        prev, self._wrist = self._wrist, (t, hand.wrist_y)
-        if prev is None or t <= prev[0]:
-            return None
-        return (hand.wrist_y - prev[1]) / (t - prev[0])
+            self.mp_gesture = None
 
     def _mp_stable(self) -> bool:
-        return self.mp_gesture is not None and self.mp_count >= self.cfg.mp_stable_frames
+        """The gesture held for mp_stable_ms: a time, not a frame count, so it means the same at any frame rate."""
+        return self.mp_gesture is not None and             self.mp_last_t - self.mp_since_t >= self.cfg.mp_stable_ms / 1000.0 - 1e-6
 
     def _tracker_contradicts(self, vote: int, t: float) -> bool:
         """
@@ -299,9 +320,12 @@ class DecisionEngine:
                 self._enter(SHOOT, t, "throw landed")
                 self.shoot_landed = True
                 return self._shoot_decide(t, vote)
-            elif enough and self._open_hand(vote):
-                # Paper/scissors after the pumps is the throw itself, whatever beat it came on
-                # (players throw on the 3rd or the 4th down stroke).
+            elif self.pumps >= max(1, cfg.pumps_before_shoot - cfg.pump_miss_tolerance - 1) \
+                    and self._open_hand(vote):
+                # Paper/scissors after pumping is the throw itself, whatever beat it came on (players
+                # throw on the 3rd or the 4th down stroke). One pump fewer is enough here: the last
+                # pump's low point is confirmed only once the hand rises again, and the fingers can
+                # already be open by then.
                 self._enter(SHOOT, t, "throw")
                 return self._shoot_decide(t, vote)
             return None
@@ -316,6 +340,7 @@ class DecisionEngine:
             if event == "landed":
                 self.shoot_landed = True
             if t - self.shoot_t > self._shoot_window():
+                self.misses += 1
                 return self._enter(ARMED, t, "no throw seen")
             return self._shoot_decide(t, vote)
 
@@ -323,8 +348,7 @@ class DecisionEngine:
             held = t - self.commit_t
             if held >= cfg.hold_max_s:
                 return self._enter(ARMED, t, "hold expired")
-            if held < cfg.hold_min_s:
-                self.pump.reset()                  # settling after the throw is not part of the next rhythm
+            if held < cfg.hold_min_s:              # settling after the throw is not part of the next round
                 return None
             if self._idle(t):
                 return self._enter(IDLE, t, "hand left")
@@ -333,6 +357,67 @@ class DecisionEngine:
                 self.pumps = 1
                 self.last_bottom_t = t
                 return out
+        return None
+
+    def _rounds(self, t: float, event: Optional[str], vote: Optional[int]) -> Optional[str]:
+        return self._guided(t, event, vote) if self.mode == "guided" else self._countdown(t, event, vote)
+
+    # ---------------------------------------------------------------- guided mode (beat guide)
+    def _guided(self, t: float, event: Optional[str], vote: Optional[int]) -> Optional[str]:
+        s, cfg = self.schedule, self.cfg
+        if s is None:
+            return None
+        te = t - self.sync_offset_s               # the frame's time on the beat clock
+        n = s.round_at(te)
+        if n != self.round:                       # a new round's count-in begins: robot to ready
+            if 0 <= self.round < s.rounds:
+                self.round_results.setdefault(self.round, None)   # ended before its window closed: a miss
+            self.round = n
+            if not 0 <= n < s.rounds:
+                self.state = IDLE if n < 0 else HOLD
+                self.reason = "get ready" if n < 0 else "match over"
+                return None
+            self.state, self.pumps, self.human = ARMED, 0, None
+            self.voter.reset()
+            self.pump.reset()                     # keeps the learned rhythm
+            self.reason = f"round {n + 1}"
+            return self._set_pose(READY)
+        if not 0 <= n < s.rounds:
+            return None
+        shoot = s.shoot_time(n)
+        if self.state == ARMED:
+            if event == "bottom":                 # shown to the player; the beat decides when to throw
+                self.pumps += 1
+                self.reason = f"pump {self.pumps}"
+            if te < shoot - cfg.guided_early_s:
+                return None
+            self.state, self.shoot_landed = SHOOT, False
+            self.window_open_t = self.shoot_t = t
+            self.reason = "throw"
+        if self.state == SHOOT:
+            if event == "landed":
+                self.shoot_landed = True
+            if te > shoot + cfg.guided_late_s:    # the window closed without a readable throw
+                self.state, self.reason = HOLD, "no throw seen"
+                self.round_results[n] = None
+                return None
+            return self._guided_decide(t, te - shoot, vote)
+        return None
+
+    def _guided_decide(self, t: float, since_beat: float, vote: Optional[int]) -> Optional[str]:
+        """Paper/scissors as soon as they show; rock once the throw had time to open and did not."""
+        if vote in (PAPER, SCISSORS):
+            return self._decided(vote, "cnn", t)
+        if self.use_mp and self._mp_stable() and self.mp_gesture in (PAPER, SCISSORS):
+            return self._decided(self.mp_gesture, "mp", t)
+        if self.use_cnn and self.last_vote in (PAPER, SCISSORS) and self.last_vote_t >= self.window_open_t:
+            return self._decided(self.last_vote, "cnn", t)
+        if not (self.shoot_landed or since_beat >= self.cfg.guided_rock_after_s):
+            return None
+        if self.use_mp and self._mp_stable() and self.mp_gesture == ROCK:
+            return self._decided(ROCK, "mp", t)
+        if self.use_cnn and self.cnn_rock_t >= self.window_open_t:
+            return self._decided(ROCK, "cnn", t)
         return None
 
     def _open_hand(self, vote: Optional[int]) -> bool:
@@ -363,7 +448,10 @@ class DecisionEngine:
         out = self._commit(gesture, source, t, force=True)
         self.state = HOLD
         self.reason = f"{GESTURE_NAME[gesture]} via {source}"
-        # The round is over: drop the throw's own stroke so it is never counted as the next round's
-        # pump, and do not let the pause after the throw count as a pump interval.
-        self.pump.reset()
+        if self.mode == "guided":
+            self.round_results[self.round] = gesture
+        # The round is over. The hand is still sinking into the throw: that low point is not the next
+        # round's first pump, and the pause after the throw is not a pump interval.
+        tempo = self.pump.tempo
+        self.pump.reset(ignore_until=t + max(SETTLE_MIN_S, 1.2 * tempo if tempo else 0.0))
         return out

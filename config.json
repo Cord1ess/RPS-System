@@ -34,7 +34,8 @@
     "max_accumulation_s": 0.5
   },
   "cnn": {
-    "model_path": "models/dextra_tuned.pth",
+    "raw_model": "models/dextra_roshambo.pth",
+    "tuned_model": "models/dextra_tuned.pth",
     "threads": 1,
     "rotate": 0,
     "flip": true
@@ -59,11 +60,11 @@
   },
   "decision": {
     "mode": "continuous",
-    "source": "cnn",
+    "recognizer": "dextra_tuned",
     "active_events_per_frame": 100,
     "still_events_per_frame": 40,
     "still_frames": 2,
-    "mp_stable_frames": 3,
+    "mp_stable_ms": 45.0,
     "mp_min_confidence": 0.6,
     "mp_still_events_in_hand": 25,
     "mp_after_cnn_commit_s": 0.15,
@@ -71,23 +72,35 @@
     "idle_timeout_s": 1.0,
     "idle_action": "ready",
     "pumps_before_shoot": 3,
-    "pump_source": "flow",
     "pump_miss_tolerance": 1,
-    "pump_min_amplitude": 0.08,
+    "pump_min_rise": 0.02,
     "pump_min_period_s": 0.18,
     "shoot_window_s": 1.2,
     "rock_settle_fallback_s": 0.35,
     "hold_min_s": 0.3,
     "hold_max_s": 4.0,
-    "correction_s": 0.0
+    "correction_s": 0.0,
+    "guided_early_s": 0.35,
+    "guided_late_s": 0.8,
+    "guided_rock_after_s": 0.3
   },
   "robot": {
-    "enabled": true,
+    "mode": "real",
     "protocol": "rps_text",
     "host": "192.168.0.126",
     "port": 4210,
     "heartbeat_s": 0.1,
     "ack_timeout_s": 0.5
+  },
+  "game": {
+    "rounds": 5,
+    "beat_bpm": 150.0,
+    "sound": "drum",
+    "beat_volume": 0.6,
+    "cue_volume": 1.0,
+    "audio_latency_ms": 40.0,
+    "lead_beats": 4,
+    "gap_beats": 4
   },
   "latency": {
     "camera_latency_ms": 50.0,

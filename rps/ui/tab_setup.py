@@ -1,14 +1,12 @@
-"""Setup page: camera, play zone, robot hand. Manual settings and tools are folded away."""
+"""Setup page: camera, light and play zone. Manual settings and tools are folded away."""
 
 import re
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QFileDialog, QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
 
 from rps.camera import crop_roi, margin_box
-from rps.robot_link import ESP_RST_BROWNOUT, MockEsp, RobotLink
 from rps.ui.base import Tab
 from rps.ui.common import ConfigForm, LogView, ProcessRunner, VideoView
 from rps.ui.style import Card, Chip, Collapsible, button, caption, page_header, row, tip
@@ -32,7 +30,6 @@ class SetupTab(Tab):
         self.runner.line.connect(self.log.log)
         self.runner.line.connect(self._tool_line)
         self.runner.finished.connect(self._process_done)
-        self._link = self._mock = None
         self._after = ""
 
         # --- camera
@@ -47,8 +44,8 @@ class SetupTab(Tab):
         r.addWidget(self.source, 1)
         r.addWidget(self.cam_btn)
         cam.body.addLayout(r)
-        self.chip_fps = Chip("Frame rate -", "off", "Frames per second. 27 or more is good; this camera's maximum "
-                                                     "is 30.")
+        self.chip_fps = Chip("Frame rate -", "off", "New images per second. 27 or more is good; this camera's "
+                                                     "maximum is 30. Images the camera sends twice count once.")
         self.chip_light = Chip("Light -", "off", "Average brightness inside the play zone (0-255). 60-200 is good.")
         self.chip_clip = Chip("Overexposed -", "off", "Share of the play zone that is pure white. Under 5% is good.")
         cam.body.addLayout(row(self.chip_fps, self.chip_light, self.chip_clip))
@@ -77,39 +74,28 @@ class SetupTab(Tab):
         self.zone_label.setWordWrap(False)
         zone.body.addLayout(row(self.roi_btn, self.zone_label))
 
-        # --- robot
-        robot = Card("Robot hand", "Connection to the ESP32. The laptop must be on the same network as the robot.")
-        robot.body.addWidget(ConfigForm(self.state, "robot", keys=["protocol", "host", "port"]))
-        self.mock_chk = tip(QCheckBox("Simulated robot"), "Test against a simulated robot on this computer.")
-        test = button("Test connection", tooltip="Team firmware: sends RPS:PAPER once, so the hand should open "
-                                                 "(it cannot reply). Reference firmware: sends a message and "
-                                                 "waits 1.5 s for its reply.")
-        test.clicked.connect(self._test_link)
-        self.chip_link = Chip("Not tested", "off", "Result of the last connection test.")
-        robot.body.addLayout(row(test, self.mock_chk, self.chip_link))
-        self.link_hint = caption("")
-        robot.body.addWidget(self.link_hint)
+        # --- camera delay (the robot itself is on the Bot tuning page)
         lat = QWidget()
         ll = QHBoxLayout(lat)
         ll.setContentsMargins(0, 0, 0, 0)
-        for text, mode, t in (("LED test", "led", "The robot flashes its LED inside the play zone; measures how "
-                                                  "late the camera sees it. Needs the robot."),
-                              ("Mirror test", "screen", "This screen flashes; hold a mirror so the camera sees it. "
-                                                        "Includes the screen's own delay.")):
+        for text, mode, t in (("Mirror test", "screen", "This screen flashes; hold a mirror so the camera sees it. "
+                                                        "Includes the screen's own delay."),
+                              ("LED test", "led", "The robot flashes its LED inside the play zone; measures how late "
+                                                  "the camera sees it. Needs the reference firmware.")):
             b = button(text, tooltip=t)
             b.clicked.connect(lambda _c=False, m=mode: self._latency(m))
             ll.addWidget(b)
         ll.addStretch(1)
-        robot.body.addWidget(Collapsible("Camera delay tests", lat, tooltip="Measure how many milliseconds the "
-                                                                             "camera image lags behind reality."))
+        cam.body.addWidget(Collapsible("Camera delay tests", lat, tooltip="Measure how many milliseconds the camera "
+                                                                           "image lags behind reality."))
 
-        save = button("Save setup", "primary", "Save camera, play zone and robot settings to config.json.")
+        save = button("Save setup", "primary", "Save the camera and play zone settings to config.json.")
         save.clicked.connect(self.state.save)
 
         panel = QWidget()
         pl = QVBoxLayout(panel)
         pl.setContentsMargins(0, 0, 6, 0)
-        for w in (cam, zone, robot):
+        for w in (cam, zone):
             pl.addWidget(w)
         pl.addLayout(row(save))
         pl.addStretch(1)
@@ -127,7 +113,8 @@ class SetupTab(Tab):
         body.addLayout(left, 1)
         body.addWidget(scroll)
         page = QVBoxLayout(self)
-        page.addWidget(page_header("Setup", "Once per location: camera, light, play zone, robot. Then Save setup."))
+        page.addWidget(page_header("Setup", "Once per location: camera, light and play zone. Then Save setup. "
+                                            "The robot is on Bot tuning."))
         page.addLayout(body, 1)
         main.worker.state_changed.connect(self._cam_state)
         self._zone_text()
@@ -157,6 +144,9 @@ class SetupTab(Tab):
             hint = "Dim: more light allows a shorter exposure and less motion blur."
         elif clip >= 5:
             hint = "Parts of the hand are washed out: move the lamp back or Auto-configure."
+        elif fps < 27 and p.get("repeats", 0) > 30:
+            hint = (f"The camera sends many images twice, so only {fps:.0f} are new each second: add light, then "
+                    "run Auto-configure (it compares both camera drivers).")
         elif fps < 27:
             hint = "Low frame rate: run Auto-configure."
         else:
@@ -258,61 +248,6 @@ class SetupTab(Tab):
                 self.log.log("Auto-configure did not finish; camera settings unchanged.")
         if self.main.current_page().uses_camera:
             self.main.start_camera()
-
-    def _test_link(self):
-        if self._link is not None:
-            return
-        host, port = self.state.cfg.robot.host, self.state.cfg.robot.port
-        if self.mock_chk.isChecked():
-            try:
-                self._mock = MockEsp(port=port, verbose=False).start()
-            except OSError:
-                self.chip_link.set("Simulated robot failed", "bad")
-                self.link_hint.setText(f"Port {port} is already in use on this computer, probably by a running "
-                                       f"game or another simulated robot. Stop it and test again.")
-                return
-            host = "127.0.0.1"
-        cfg = self.state.cfg.robot
-        self._link = RobotLink(host, port, heartbeat_s=0.05, protocol=cfg.protocol).start()
-        # reference firmware: READY, then wait for replies; team firmware: one visible move (it cannot reply)
-        self._link.send_pose("N" if cfg.protocol == "ack" else "P")
-        self.chip_link.set("Testing...", "info")
-        QTimer.singleShot(1500, self._link_result)
-
-    def _link_result(self):
-        stats = self._link.stats()
-        self._link.stop(send_ready=False)
-        self._link = None
-        simulated = self._mock is not None
-        received = self._mock.received if simulated else 0
-        if self._mock is not None:
-            self._mock.stop()
-            self._mock = None
-        if not stats["replies"]:                   # team firmware: RPS:<GESTURE>, no replies
-            where = f"{self.state.cfg.robot.host}:{self.state.cfg.robot.port}"
-            if stats["sent"] == 0:
-                self.chip_link.set("Could not send", "bad")
-                self.link_hint.setText("Check that the laptop is on the same network as the robot.")
-            elif simulated:
-                self.chip_link.set("Simulated robot received RPS:PAPER" if received else "Simulated robot got "
-                                   "nothing", "ok" if received else "bad")
-                self.link_hint.setText("")
-            else:
-                self.chip_link.set("Sent RPS:PAPER", "info")
-                self.link_hint.setText(f"Sent to {where}. This firmware does not reply, so delivery cannot be "
-                                       f"confirmed here: check that the hand opened.")
-            return
-        if stats["acked"]:
-            name = "Simulated robot" if simulated else "Robot"
-            rtt = stats["rtt_median_ms"]
-            self.chip_link.set(f"{name} replied {stats['acked']}/{stats['sent']}"
-                               + (f" · {rtt:.1f} ms" if rtt is not None else ""), "ok")
-            self.link_hint.setText("The robot last restarted from a power dip: give the servos their own supply."
-                                   if stats["last_reset_reason"] == ESP_RST_BROWNOUT else "")
-        else:
-            self.chip_link.set(f"No reply (0/{stats['sent']})", "bad")
-            self.link_hint.setText("Check: laptop on the RPS-HAND Wi-Fi, address and port match the firmware, "
-                                   "Windows Firewall allows Python.")
 
     def shutdown(self):
         self.runner.kill()

@@ -92,6 +92,16 @@ def classify_curls(curls: Sequence[float], prev_extended: Optional[List[bool]],
     return gesture, confidence, extended
 
 
+def tracker_fingerprint(cfg: HandConfig) -> str:
+    """Changes whenever stored Mediapipe readings could differ: model file, settings or rules."""
+    import hashlib
+    import json
+    from dataclasses import asdict
+    size = os.path.getsize(cfg.model_path) if os.path.exists(cfg.model_path) else 0
+    key = f"{size}|{json.dumps(asdict(cfg), sort_keys=True)}|{HAND_RULES_VERSION}"
+    return hashlib.md5(key.encode()).hexdigest()[:12]
+
+
 class HandTracker:
     def __init__(self, cfg: HandConfig):
         from mediapipe.tasks import python as mp_python
