@@ -14,9 +14,9 @@
     "restore_auto_on_exit": true
   },
   "roi": {
-    "x": 357,
-    "y": 48,
-    "size": 252,
+    "x": 247,
+    "y": 56,
+    "size": 317,
     "record_margin": 0.25
   },
   "dvs": {
@@ -87,10 +87,15 @@
   "robot": {
     "mode": "real",
     "protocol": "rps_text",
-    "host": "192.168.0.126",
+    "host": "10.15.12.20",
     "port": 4210,
     "heartbeat_s": 0.1,
-    "ack_timeout_s": 0.5
+    "ack_timeout_s": 0.5,
+    "finger_angles": [
+      0,
+      0,
+      0
+    ]
   },
   "game": {
     "rounds": 5,

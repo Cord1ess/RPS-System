@@ -4,9 +4,13 @@ replayed results match live behaviour:
 
     ROI -> PseudoDVS -> [frame emitted?] -> CNN -> decision.on_motion -> send pose (immediately)
         -> MediaPipe (same frame) -> decision.on_hand -> send pose if changed
+
+Each decision comes with a DecisionTiming: when its throw first showed on camera, the frame it was
+decided on, and when the robot's command left, so the app can show where the time went.
 """
 
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple
 
@@ -18,6 +22,36 @@ from rps.decision import DecisionEngine, MotionObs, Snapshot
 from rps.dvs_emulator import DvsFrame, DvsStats, PseudoDVS, events_in_box
 from rps.hand_tracker import HandObs
 from rps.motion import VerticalMotion
+
+
+@dataclass
+class DecisionTiming:
+    """How long one decision took, on the camera clock (perf_counter)."""
+    gesture: int
+    pose: str                         # the robot's move
+    source: str                       # "cnn" (Dextra) | "mp" (Mediapipe)
+    t_first: float                    # first camera frame that showed the throw (rock: when the throw landed)
+    t_frame: float                    # the camera frame it was decided on
+    t_sent: Optional[float]           # when the command left for the robot (None: nothing sent / not on this clock)
+    frames: int                       # camera frames from the first to the deciding one
+    dvs_ms: float                     # work on the deciding frame: Dextra view ...
+    cnn_ms: float                     # ... Dextra ...
+    mp_ms: float                      # ... and Mediapipe (0 when it ran after the command was sent)
+
+    @property
+    def read_ms(self) -> float:
+        """From the first frame showing the throw to the frame it was decided on: waiting to be sure."""
+        return max(0.0, (self.t_frame - self.t_first) * 1000.0)
+
+    @property
+    def process_ms(self) -> Optional[float]:
+        """From the deciding frame arriving to the command leaving (includes waiting for the previous frame)."""
+        return None if self.t_sent is None else max(0.0, (self.t_sent - self.t_frame) * 1000.0)
+
+    @property
+    def software_ms(self) -> Optional[float]:
+        """Everything the laptop does: first frame showing the throw -> command sent."""
+        return None if self.t_sent is None else self.read_ms + self.process_ms
 
 
 @dataclass
@@ -35,6 +69,8 @@ class StepResult:
     mp_ms: float = 0.0
     total_ms: float = 0.0
     vy: Optional[float] = None
+    decision: Optional[DecisionTiming] = None           # set on the frame a decision was made
+    mp_decided: bool = False                            # the command went out after Mediapipe ran
 
 
 # The four ways to read the hand, by the names used everywhere in the app.
@@ -62,7 +98,7 @@ def missing_reason(cfg: Config, recognizer: str) -> Optional[str]:
     if model is None or os.path.exists(model):
         return None
     if model == cfg.cnn.raw_model:
-        return "Dextra Raw is not downloaded yet (Bot tuning or Play Debug: Download Dextra)."
+        return "Dextra Raw is not downloaded yet (Play Debug: Download Dextra)."
     return "Dextra Tuned does not exist yet: tune Dextra on the Train page."
 
 
@@ -125,6 +161,7 @@ class Pipeline:
         self.motion = VerticalMotion()
         self.engine = DecisionEngine(cfg.decision, cfg.vote, use_cnn=cnn is not None, use_mp=hand is not None)
         self.last_dvs_frame: Optional[DvsFrame] = None
+        self._frame_times = deque(maxlen=300)          # recent capture times, to count frames per decision
 
     def _emit_pose(self, pose: Optional[str], result: StepResult):
         if pose is None:
@@ -140,6 +177,8 @@ class Pipeline:
 
     def step(self, frame: Frame, roi: Roi) -> StepResult:
         t0 = time.perf_counter()
+        self._frame_times.append(frame.t)
+        commits = self.engine.commits
         roi_img = crop_roi(frame.bgr, roi)
         dvs_frame, stats = self.dvs.process(roi_img, frame.t)
         t1 = time.perf_counter()
@@ -167,11 +206,22 @@ class Pipeline:
             result.hand = hand
             result.events_in_hand = events_in_box(stats.event_map, box)
             result.mp_ms = hand.ms
+            mp_before = len(result.poses)
             self._emit_pose(self.engine.on_hand(frame.t, hand, result.events_in_hand), result)
+            result.mp_decided = len(result.poses) > mp_before
 
         result.snapshot = self.engine.snapshot()
         result.total_ms = (time.perf_counter() - t0) * 1000.0
+        if self.engine.commits != commits and self.engine.last_decision is not None:
+            result.decision = self._timing(self.engine.last_decision, result)
         return result
+
+    def _timing(self, d, r: StepResult) -> DecisionTiming:
+        sent = next((ts for pose, ts in r.poses if pose == d.pose), None) if r.frame.live else None
+        frames = sum(1 for ft in self._frame_times if d.t_first - 1e-6 <= ft <= d.t_frame + 1e-6)
+        mp_ms = r.mp_ms if r.mp_decided and r.hand is not None and not r.hand.skipped else 0.0
+        return DecisionTiming(d.gesture, d.pose, d.source, d.t_first, d.t_frame, sent, max(1, frames),
+                              r.dvs_ms, r.cnn_ms if r.cnn is not None else 0.0, mp_ms)
 
     def log_record(self, r: StepResult) -> dict:
         snap = r.snapshot

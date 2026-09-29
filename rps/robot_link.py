@@ -9,7 +9,7 @@ READY); the counter logic stays on the PC. Two firmware protocols (robot.protoco
     Finger tuning (Bot tuning page), the one command it answers:
     PC  -> ESP  ANGLE:<channel>,<angle>       channel 0 pinky + ring, 1 index, 2 middle + point;
                                               angle 0 (extended) ... 180 (folded)
-    ESP -> PC   a confirmation text, to the sender's address and port
+    ESP -> PC   CONFIRM_ANGLE:ch=<channel>(<label>),deg=<angle>, to the sender's address and port
 
 "ack" (firmware/esp32_rps_receiver, the reference sketch), default port 4210:
     PC  -> ESP  P,<seq>,<pose>,<pc_ms>        pose in {R, P, S, N}
@@ -270,7 +270,7 @@ class MockEsp:
     """
     In-process ESP32 stand-in for either protocol: logs pose changes, acknowledges the reference
     protocol's messages and, like the team firmware, stays silent on RPS:<GESTURE> commands and
-    confirms ANGLE commands (its confirmation text is its own: the real firmware's may differ).
+    confirms ANGLE commands in the team firmware's format.
     """
 
     def __init__(self, port: int = 4210, host: str = "127.0.0.1", verbose: bool = True):
@@ -318,7 +318,8 @@ class MockEsp:
                 if self.verbose:
                     print(f"[mock_esp] t={esp_ms:7d} ms  channel {msg['channel']} -> {msg['angle']} deg")
                 try:
-                    self.sock.sendto(f"OK ANGLE:{msg['channel']},{msg['angle']}".encode("ascii"), addr)
+                    self.sock.sendto(f"CONFIRM_ANGLE:ch={msg['channel']}({FINGER_CHANNELS[msg['channel']]}),"
+                                     f"deg={msg['angle']}".encode("ascii"), addr)
                 except OSError:
                     pass
             if msg["type"] in ("P", "L"):

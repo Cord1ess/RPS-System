@@ -1,7 +1,8 @@
 """
 Play Debug page: everything the recognition and the game rules are doing, for tuning.
   status bar (decision, read by, robot, round, tempo) | camera | delay graph | health
-  right column: Run | Dextra | Mediapipe | Orientation and tuning | Log
+  (Speed under the camera: where each throw's time went)
+  right column: Run | Last throws | Dextra | Mediapipe | Orientation and tuning | Log
 The robot connection is set on the Bot tuning page.
 """
 
@@ -68,7 +69,7 @@ class PlayTab(PlayBase):
         self.m_source = Metric("Read by", "Which reader made the decision. In Both, Dextra Tuned decides while your "
                                           "hand moves and Mediapipe when it is steady (or when it clearly "
                                           "disagrees).")
-        self.m_robot = Metric("Robot", "The move sent to the robot hand (the one that beats yours).")
+        self.m_robot = Metric("Robot", "The move sent to the robot hand (Robot plays: to win, draw or lose).")
         self.m_round = Metric("Round", "Countdown: pumps counted, throw, result. Beat guide: the count 3, 2, 1, "
                                        "SHOOT.")
         self.m_tempo = Metric("Tempo", "Your pump speed, learned from your last pumps.")
@@ -83,7 +84,8 @@ class PlayTab(PlayBase):
         left.setSpacing(6)
         left.addWidget(bar)
         left.addWidget(self.view, 1)
-        left.addWidget(self.make_delay_plot())
+        left.addWidget(self.make_delay_card(table=True))
+        left.addWidget(self.make_delay_plot(100))
         left.addLayout(self.make_chips())
 
         # ---------------- Run
@@ -110,6 +112,14 @@ class PlayTab(PlayBase):
         g.addWidget(self.model_detail, 1, 1)
         g.addWidget(label("Game", self.mode.toolTip()), 2, 0)
         g.addWidget(self.mode, 2, 1)
+        self.robot_plays = tip(QComboBox(), "To win: the robot shows the move that beats your throw. To draw: the "
+                                            "same move as you (in Live mode it mirrors your hand). To lose: the move "
+                                            "your throw beats.")
+        for data, text in CHOICES[("decision", "robot_plays")]:
+            self.robot_plays.addItem(text, data)
+        self.robot_plays.currentIndexChanged.connect(self._choice_changed)
+        g.addWidget(label("Robot plays", self.robot_plays.toolTip()), 3, 0)
+        g.addWidget(self.robot_plays, 3, 1)
         run.body.addWidget(self.options)
         self.summary = caption("", "Current run. Stop to change it.")
         self.summary.setVisible(False)
@@ -155,6 +165,7 @@ class PlayTab(PlayBase):
         pl = QVBoxLayout(panel)
         pl.setContentsMargins(0, 0, 6, 0)
         pl.addWidget(run)
+        pl.addWidget(self.delay_card.table_card)
         pl.addWidget(self.make_dextra_card())
         pl.addWidget(self.make_mediapipe_card())
         pl.addWidget(Collapsible("Orientation and tuning", adv, tooltip="Turn or mirror the Dextra view for Dextra "
@@ -187,6 +198,9 @@ class PlayTab(PlayBase):
             if self.mode.currentData() and cfg.decision.mode != self.mode.currentData():
                 cfg.decision.mode = self.mode.currentData()
                 self.state.mark_dirty()
+            if self.robot_plays.currentData() and cfg.decision.robot_plays != self.robot_plays.currentData():
+                cfg.decision.robot_plays = self.robot_plays.currentData()
+                self.state.mark_dirty()
         self._update_enabled()
 
     def _update_enabled(self, *_):
@@ -206,6 +220,7 @@ class PlayTab(PlayBase):
             select_data(self.detector, cfg.decision.recognizer)
             refresh_recognizers(self.detector, cfg)
             select_data(self.mode, cfg.decision.mode)
+            select_data(self.robot_plays, cfg.decision.robot_plays)
         self.import_btn.setVisible(not os.path.exists(cfg.cnn.raw_model))
         self._update_enabled()
         super().on_activated()
@@ -282,8 +297,8 @@ class PlayTab(PlayBase):
         if not show:
             robot = {"real": "robot", "simulated": "simulated robot", "off": "robot off"}[self.state.cfg.robot.mode]
             game = self.mode.currentText().split(" (")[0]
-            self.summary.setText(f"{RECOGNIZERS[self.running_recognizer]} · {game} · "
-                                 f"{robot}")
+            plays = self.robot_plays.currentText().split(" (")[0].lower()
+            self.summary.setText(f"{RECOGNIZERS[self.running_recognizer]} · {game} · {robot} plays {plays}")
 
     def _reset_display(self):
         self._beat_label = ""

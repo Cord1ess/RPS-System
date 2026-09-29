@@ -2,7 +2,9 @@
 Frame sources for the v3 pipeline.
 
 - CameraSource: threaded webcam grabber with latest-frame semantics, locked exposure and
-  white balance, and a perf_counter timestamp + frame id on every frame.
+  white balance, and a perf_counter timestamp + frame id on every frame. Windows (Media Foundation,
+  DirectShow) and Linux (V4L2, e.g. a USB webcam on a Raspberry Pi); or an IP camera (camera.url,
+  rtsp:// or http:// MJPEG) through FFmpeg with its buffering turned off.
 - VideoFileSource: replays a recording made by record_session.py with its recorded timestamps
   (re-stamped on the perf_counter clock when replayed in real time, as the app does).
 - MockSource: synthetic moving-blob scene for tests and hardware-free smoke runs.
@@ -17,6 +19,7 @@ threshold (still frames, Mediapipe repeats) is met by copies. Both the webcam an
 import csv
 import json
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -29,7 +32,38 @@ from rps.config import CameraConfig, RoiConfig
 
 Roi = Tuple[int, int, int]
 
-BACKENDS = {"dshow": cv2.CAP_DSHOW, "msmf": cv2.CAP_MSMF, "any": cv2.CAP_ANY}
+BACKENDS = {"dshow": cv2.CAP_DSHOW, "msmf": cv2.CAP_MSMF, "v4l2": cv2.CAP_V4L2, "any": cv2.CAP_ANY}
+WINDOWS_ONLY = ("msmf", "dshow")
+# An IP camera through FFmpeg: no input buffering, so the newest image is the one read (low delay).
+# TCP keeps images whole: a torn UDP image would look like movement to the Dextra view.
+FFMPEG_LOW_DELAY = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;0|reorder_queue_size;0"
+
+
+def backend_name(name: str, platform: str = sys.platform) -> str:
+    """The capture driver to use here: the Windows drivers do not exist on Linux, which uses V4L2."""
+    if platform != "win32" and name in WINDOWS_ONLY:
+        return "v4l2"
+    return name if name in BACKENDS else "any"
+
+
+def fourcc_for(backend: str, fourcc: str) -> str:
+    """V4L2 calls uncompressed YUY2 'YUYV'."""
+    return "YUYV" if backend == "v4l2" and fourcc.upper() == "YUY2" else fourcc
+
+
+def set_manual_exposure(cap, backend: str, log2_seconds: float):
+    """Locks exposure. The setting is in DirectShow's unit (log2 seconds: -6 = 15.6 ms); V4L2 takes
+    100 microsecond steps and 1 = manual, DirectShow/Media Foundation 0.25 = manual."""
+    if backend == "v4l2":
+        cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+        cap.set(cv2.CAP_PROP_EXPOSURE, round(2.0 ** log2_seconds * 10000.0))
+    else:
+        cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+        cap.set(cv2.CAP_PROP_EXPOSURE, log2_seconds)
+
+
+def set_auto_exposure(cap, backend: str):
+    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3 if backend == "v4l2" else 0.75)   # V4L2: aperture priority
 REPEAT_MAX_S = 0.02     # a byte-identical image this soon after the last is the driver's copy, not a new exposure
 
 
@@ -44,7 +78,7 @@ class Frame:
     id: int
     t: float            # capture time in seconds (perf_counter for live and real-time replay, else recorded)
     bgr: np.ndarray
-    live: bool = False  # True when t is on the perf_counter clock (webcam), so latencies can be measured
+    live: bool = False  # True when t is on the perf_counter clock (webcam, real-time replay): latencies count
 
 
 def clamp_roi(roi: Roi, width: int, height: int) -> Roi:
@@ -84,24 +118,43 @@ class CameraSource:
         self._thread: Optional[threading.Thread] = None
         self.dropped_reads = 0
         self.repeats = 0                # driver repeats skipped (see is_repeat)
+        self.backend = backend_name(cam.backend)
 
     def open(self) -> "CameraSource":
-        backend = BACKENDS.get(self.cfg.backend, cv2.CAP_ANY)
-        print(f"[camera] Opening camera {self.cfg.index} (backend={self.cfg.backend})...")
-        cap = cv2.VideoCapture(self.cfg.index, backend)
+        if self.cfg.url:
+            return self._open_url()
+        self.backend = backend_name(self.cfg.backend)
+        print(f"[camera] Opening camera {self.cfg.index} (backend={self.backend})...")
+        cap = cv2.VideoCapture(self.cfg.index, BACKENDS[self.backend])
         if not cap.isOpened():
-            raise RuntimeError(
-                f"Could not open camera {self.cfg.index}. Check Windows camera privacy settings "
-                f"and close other apps using it (OBS, Teams, browser)."
-            )
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self.cfg.fourcc))
+            hint = ("Check Windows camera privacy settings and close other apps using it (OBS, Teams, browser)."
+                    if sys.platform == "win32" else
+                    "Check that it is plugged in (ls /dev/video*) and that no other program uses it.")
+            raise RuntimeError(f"Could not open camera {self.cfg.index}. {hint}")
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc_for(self.backend, self.cfg.fourcc)))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg.width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cfg.height)
         cap.set(cv2.CAP_PROP_FPS, self.cfg.fps)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self.cap = cap
         self.apply_locks()
+        return self._describe()
 
+    def _open_url(self) -> "CameraSource":
+        """An IP camera. Its resolution, frame rate and exposure are set in the camera's own settings."""
+        self.backend = "ffmpeg"
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = FFMPEG_LOW_DELAY
+        print(f"[camera] Opening IP camera {self.cfg.url}...")
+        cap = cv2.VideoCapture(self.cfg.url, cv2.CAP_FFMPEG)
+        if not cap.isOpened():
+            raise RuntimeError(f"Could not open the IP camera at {self.cfg.url}. Check the address (open it in a "
+                               f"browser or VLC) and that the laptop or Pi is on its network.")
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.cap = cap
+        return self._describe()
+
+    def _describe(self) -> "CameraSource":
+        cap = self.cap
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.roi = clamp_roi((self._roi_cfg.x, self._roi_cfg.y, self._roi_cfg.size), w, h)
@@ -115,6 +168,7 @@ class CameraSource:
             "auto_exposure": cap.get(cv2.CAP_PROP_AUTO_EXPOSURE),
             "wb_temperature": cap.get(cv2.CAP_PROP_WB_TEMPERATURE),
             "auto_wb": cap.get(cv2.CAP_PROP_AUTO_WB),
+            "backend": self.backend,
         }
         print(f"[camera] Opened: {self.info}")
         return self
@@ -126,9 +180,10 @@ class CameraSource:
         """
         cap = self.cap
         self._locked = False
+        if self.backend == "ffmpeg":                    # an IP camera: set in its own settings
+            return
         if self.cfg.lock_exposure:
-            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)   # DirectShow: 0.25 = manual
-            cap.set(cv2.CAP_PROP_EXPOSURE, self.cfg.exposure)
+            set_manual_exposure(cap, self.backend, self.cfg.exposure)
             self._locked = True
         if self.cfg.lock_white_balance:
             cap.set(cv2.CAP_PROP_AUTO_WB, 0)
@@ -139,7 +194,7 @@ class CameraSource:
         """Returns the driver to automatic exposure/white balance so other apps look normal."""
         if self.cap is None or not getattr(self, "_locked", False):
             return
-        self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)
+        set_auto_exposure(self.cap, self.backend)
         self.cap.set(cv2.CAP_PROP_AUTO_WB, 1)
 
     def start(self) -> "CameraSource":
@@ -251,7 +306,7 @@ class VideoFileSource:
             delay = t - time.perf_counter()
             if delay > 0:
                 time.sleep(delay)
-        frame = Frame(self._idx, t, img)
+        frame = Frame(self._idx, t, img, live=self.realtime)
         self._idx += 1
         return frame
 
@@ -297,7 +352,7 @@ class MockSource:
         offset = 0.18 * size * np.sin(2 * np.pi * 1.5 * cycle) if cycle < 2.0 else 0.0
         cx, cy = x + size // 2, int(y + size // 2 + offset)
         cv2.ellipse(img, (cx, cy), (size // 6, size // 5), 0, 0, 360, (210, 200, 190), -1)
-        frame = Frame(self._idx, t, img)
+        frame = Frame(self._idx, t, img, live=self.realtime)
         self._idx += 1
         return frame
 

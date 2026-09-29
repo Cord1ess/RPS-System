@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QHeaderView, Q
 from rps.pipeline import RECOGNIZERS, missing_reason
 from rps.recorder import list_recordings
 from rps.ui.base import Tab
-from rps.ui.common import LogView, ProcessRunner
+from rps.ui.common import LogView, ProcessRunner, open_folder
 from rps.ui.style import BAD, OK, Card, Collapsible, button, caption, page_header, row, tip
 
 # (result key, column title, format, hover)
@@ -184,8 +184,7 @@ class EvaluateTab(Tab):
 
     def _open_sheets(self):
         path = self._transfer_dir()
-        if os.path.isdir(path):
-            os.startfile(os.path.abspath(path))
+        open_folder(path)
 
     def _line(self, line: str):
         if line.startswith("@@RESULT "):

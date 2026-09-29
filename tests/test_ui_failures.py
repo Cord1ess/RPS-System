@@ -9,6 +9,7 @@ import os
 import shutil
 import time
 
+import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -201,7 +202,7 @@ def test_bot_tuning_moves_each_finger_and_shows_the_confirmation(qapp, window):
     bot.angle_spins[1].setValue(120)
     bot.angle_btns[1].click()
     pump(qapp, 0.6)
-    assert bot.tune_chip.text() == "Simulated robot confirmed: OK ANGLE:1,120"
+    assert bot.tune_chip.text() == "Simulated robot confirmed: CONFIRM_ANGLE:ch=1(Index),deg=120"
     assert "ANGLE:1,120" in bot.log.toPlainText()
     assert bot._mock.angles == {1: 120}
     bot.fold_all.click()
@@ -360,3 +361,69 @@ def test_bot_tuning_sends_every_click_at_once_from_one_port(qapp, window):
     assert [d for d, _ in got] == ["RPS:SCISSORS", "RPS:ROCK", "RPS:PAPER", "RPS:ROCK", "RPS:SCISSORS", "ANGLE:0,0"]
     assert len({port for _, port in got}) == 1
     assert bot.log.toPlainText().count("RPS:") == 5                    # every command is in the log
+
+
+def test_play_scores_each_round_by_what_the_robot_plays(qapp, window):
+    from rps.hand_tracker import PAPER, ROCK
+    window.tabs.setCurrentIndex(PLAY)
+    game = window.pages[PLAY]
+    cfg = window.state.cfg
+    for plays, winner in (("win", "robot"), ("draw", "draw"), ("lose", "you")):
+        select_data(game.robot_plays, plays)
+        assert cfg.decision.robot_plays == plays
+        game.results = []
+        game._record(PAPER, "Mediapipe")
+        assert game.results[-1][0] == winner, plays
+    game._record(None, "-")                                           # nothing read in time: your point
+    game._record(ROCK, "Mediapipe")                                    # lose: the robot plays scissors
+    assert [w for w, *_ in game.results] == ["you", "you", "you"] and game.results[-1][2] == "S"
+    select_data(game.robot_plays, "draw")
+    game.results = []
+    game._record(ROCK, "Dextra Tuned")
+    game._show_score()
+    assert game.m_draws.value.text() == "1" and game._final_text() == "Draw"
+    assert "draw" in game.result_line.text()
+
+
+def test_speed_card_shows_where_the_time_went(qapp, window):
+    from rps.hand_tracker import PAPER
+    from rps.pipeline import DecisionTiming
+    from rps.ui.delay_view import throw_delay
+    cfg = window.state.cfg
+    cfg.latency.camera_latency_ms, cfg.latency.network_ms = 50.0, 0.0
+    cfg.latency.servo_transition_ms["R>S"] = 180.0
+    window.tabs.setCurrentIndex(DEBUG)
+    debug = window.pages[DEBUG]
+    timing = DecisionTiming(PAPER, "S", "mp", t_first=10.0, t_frame=10.066, t_sent=10.080, frames=3,
+                            dvs_ms=1.5, cnn_ms=0.0, mp_ms=11.0)
+    d = throw_delay(timing, "R", cfg)
+    assert d.compute_ms == pytest.approx(14.0) and d.to_command_ms == pytest.approx(80.0)
+    assert d.hardware_ms == pytest.approx(230.0)                        # camera 50 + hand 180 (Wi-Fi unknown)
+    debug.decisions.append((timing, "R"))                             # as the camera thread queues it
+    debug.on_frame({"display": np.zeros((48, 64, 3), np.uint8), "running": False})
+    card = debug.delay_card
+    assert card.headline.text() == "Computed and sent in 14 ms  ·  throw -> command 80 ms"
+    assert "2 more camera images at 33 ms each" in card.detail.text() and "wi-fi ?" in card.detail.text()
+    assert card.table.rowCount() == 1 and card.table.item(0, 5).text() == "80"
+    assert "computing median 14 ms" in card.summary.text()
+    same = throw_delay(timing, "S", cfg)                               # the hand already showed it
+    assert same.ms("Robot hand moves") == 0.0
+
+
+def test_wifi_delay_on_the_simulated_robot_is_shown_but_not_kept(qapp, window):
+    window.tabs.setCurrentIndex(BOT)
+    bot = window.pages[BOT]
+    window.state.cfg.latency.network_ms = 0.0
+    bot.wifi_btn.click()
+    end = time.time() + 6.0
+    while time.time() < end and not bot.wifi_btn.isEnabled():
+        pump(qapp, 0.05)
+    assert "ms one way" in bot.wifi_chip.text() and "not kept" in bot.wifi_hint.text()
+    assert window.state.cfg.latency.network_ms == 0.0
+
+
+def test_the_app_can_open_straight_on_a_page(qapp, window):
+    assert window.open_page("play") and window.tabs.currentIndex() == PLAY
+    assert window.open_page("play-debug") and window.tabs.currentIndex() == DEBUG
+    assert window.open_page("Bot tuning") and window.tabs.currentIndex() == BOT
+    assert not window.open_page("nothing like it") and window.tabs.currentIndex() == BOT

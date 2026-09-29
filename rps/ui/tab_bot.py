@@ -1,14 +1,15 @@
 """
 Bot tuning page: everything about the robot hand. Connection (real, simulated or off; commands;
 address), a connection test, sending each command on its own, finger tuning (the team firmware's
-ANGLE:<channel>,<angle>: one servo straight to an angle, confirmed by the robot) and the hand's
-move times.
+ANGLE:<channel>,<angle>: one servo straight to an angle, confirmed by the robot), the hand's move
+times and the Wi-Fi delay (ping), which the Play pages' Speed card uses.
 
 While the page is open it keeps ONE connection to the robot (one socket, so every command comes
 from the same port, as the team's own tool sends them). Every click is sent at once, in order, and
 logged; anything the robot sends back is logged too.
 """
 
+import threading
 import time
 from collections import deque
 
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import QCheckBox, QGridLayout, QHBoxLayout, QScrollArea, 
 
 from rps.robot_link import (ANGLE_MAX, ANGLE_MIN, ESP_RST_BROWNOUT, FINGER_CHANNELS, TEXT_COMMAND, MockEsp, RobotLink,
                             encode_angle)
+from rps.netping import ping_ms, summarize
 from rps.ui.base import Tab
 from rps.ui.common import ConfigForm, LogView
 from rps.ui.style import Card, Chip, Collapsible, button, caption, label, page_header, row, tip
@@ -29,6 +31,7 @@ class BotTab(Tab):
     title = "2  Bot tuning"
     uses_camera = False
     robot_said = Signal(str)                     # text the robot sent back (from the link's thread)
+    wifi_done = Signal(object)                   # ping summary dict, or an error message
 
     def __init__(self, main):
         super().__init__(main)
@@ -39,6 +42,7 @@ class BotTab(Tab):
         self._check_id = 0                       # only the latest command's check updates the chip
         self._awaiting = deque()                 # ANGLE commands waiting for a confirmation: (channel, angle, t)
         self.robot_said.connect(self._robot_said)
+        self.wifi_done.connect(self._wifi_result)
 
         conn = Card("Connection", "How the app reaches the robot hand. The laptop must be on the same network as "
                                   "the robot.")
@@ -72,9 +76,23 @@ class BotTab(Tab):
 
         fingers = self._make_finger_card()
 
-        timing = Card("Move times", "How long the hand takes to move between poses. Used by Evaluate to estimate "
-                                    "when the robot's move becomes visible.")
+        timing = Card("Move times", "How long the hand takes to move between poses. The Play pages' Speed card "
+                                    "and Evaluate use them.")
         timing.body.addWidget(ConfigForm(self.state, "latency", keys=["servo_transition_ms"]))
+        timing.body.addWidget(caption("Measure them with a slow-motion phone video (240 fps) of the laptop screen and "
+                                      "the hand: frames from the robot's move appearing on screen to the hand "
+                                      "stopping, times 4.2 ms."))
+
+        wifi = Card("Wi-Fi delay", "How long a command takes to reach the robot over Wi-Fi, measured with ping (the "
+                                   "ESP32 answers pings by itself). The Play pages' Speed card shows it.")
+        self.wifi_btn = button("Measure Wi-Fi delay", tooltip="Pings the robot 10 times (about 2 seconds) and keeps "
+                                                              "half the typical round trip as the one-way delay.")
+        self.wifi_btn.clicked.connect(self._measure_wifi)
+        self.wifi_chip = Chip("Not measured", "off", "The last measurement.")
+        wifi.body.addLayout(row(self.wifi_btn, self.wifi_chip))
+        self.wifi_hint = caption("")
+        self.wifi_hint.setWordWrap(True)
+        wifi.body.addWidget(self.wifi_hint)
 
         panel = QWidget()
         pl = QVBoxLayout(panel)
@@ -84,6 +102,7 @@ class BotTab(Tab):
         a.addWidget(conn)
         a.addWidget(fingers)
         a.addWidget(timing)
+        a.addWidget(wifi)
         a.addStretch(1)
         b.addWidget(test, 1)
         cols.addLayout(a, 1)
@@ -191,6 +210,58 @@ class BotTab(Tab):
             self.tune_hint.setText("The command went out but nothing came back: check the address and port, and "
                                    "that Windows Firewall lets Python receive (the confirmation comes back to it).")
 
+    # ------------------------------------------------------------------ Wi-Fi delay
+    def _measure_wifi(self):
+        cfg = self.state.cfg.robot
+        if cfg.mode == "off" or not self.wifi_btn.isEnabled():
+            return
+        host = "127.0.0.1" if cfg.mode == "simulated" else cfg.host
+        self.wifi_btn.setEnabled(False)
+        self.wifi_chip.set("Measuring...", "info")
+        threading.Thread(target=self._wifi_job, args=(host,), daemon=True).start()
+
+    def _wifi_job(self, host: str):
+        try:
+            result = summarize(ping_ms(host, count=10))
+        except Exception as e:                     # no ping command, bad address, timeout...
+            result = f"Ping could not run: {e}"
+        try:
+            self.wifi_done.emit(result)
+        except RuntimeError:                       # the window closed meanwhile
+            pass
+
+    def _wifi_result(self, result):
+        self.wifi_btn.setEnabled(self.state.cfg.robot.mode != "off")
+        simulated = self.state.cfg.robot.mode == "simulated"
+        if isinstance(result, str):
+            self.wifi_chip.set("Could not measure", "bad")
+            self.wifi_hint.setText(result)
+            return
+        if not result["answered"]:
+            self.wifi_chip.set(f"No answer (0 of {result['sent']})", "bad")
+            self.wifi_hint.setText("The robot did not answer: check that it is on, its address, and that the laptop "
+                                   "is on the same network.")
+            return
+        one_way = result["one_way_ms"]
+        lost = result["sent"] - result["answered"]
+        self.wifi_chip.set(f"{one_way:.1f} ms one way (round trip {result['median_ms']:.1f} ms, slowest "
+                           f"{result['max_ms']:.0f} ms" + (f", {lost} lost" if lost else "") + ")",
+                           "warn" if result["slow"] or lost else "ok")
+        self.log.log(f"{time.strftime('%H:%M:%S')}  Wi-Fi delay: {one_way:.1f} ms one way (round trip median "
+                     f"{result['median_ms']:.1f} ms, slowest {result['max_ms']:.0f} ms, {lost} lost)")
+        if simulated:
+            self.wifi_hint.setText("Simulated robot: this computer, so this is not a Wi-Fi delay. It is not kept.")
+            return
+        cfg = self.state.cfg.latency
+        if round(one_way, 1) != cfg.network_ms:
+            cfg.network_ms = round(one_way, 1)
+            self.state.mark_dirty()
+        self.wifi_hint.setText(
+            "Slow or uneven for a local network. The usual cause is the ESP32's Wi-Fi power saving, which delays "
+            "each command by up to ~100 ms: add WiFi.setSleep(false); to its setup(). Also keep the robot close "
+            "to the router (or the laptop's hotspot)." if result["slow"] else
+            "Kept for the Speed card on the Play pages (save the settings to remember it).")
+
     def _remember_angle(self, channel: int, angle: int):
         cfg = self.state.cfg.robot
         angles = (list(cfg.finger_angles) + [0] * len(FINGER_CHANNELS))[:len(FINGER_CHANNELS)]
@@ -204,6 +275,9 @@ class BotTab(Tab):
         self.form.refresh()
         self._load_angles()
         self._settings_changed()
+        saved = self.state.cfg.latency.network_ms
+        if saved and self.wifi_chip.text() == "Not measured":
+            self.wifi_chip.set(f"Last measured: {saved:.1f} ms one way", "ok")
 
     def on_deactivated(self):
         self._close_link()               # the Play pages open their own connection (and simulated robot)
@@ -216,7 +290,7 @@ class BotTab(Tab):
             b.setVisible(not (text and pose == "N"))            # the team firmware has no ready position
             b.setToolTip(f"Send {command} once." if command else "")
         off = cfg.mode == "off"
-        for b in [self.test_btn, *self.pose_btns.values()]:
+        for b in [self.test_btn, *self.pose_btns.values(), self.wifi_btn]:
             b.setEnabled(not off)
         if off:
             self.chip.set("Robot off", "off")

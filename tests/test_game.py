@@ -30,13 +30,13 @@ def hand(g, y=0.5, present=True):
     return HandObs(present=True, gesture=g, confidence=0.9, wrist_y=y, box=(0.2, 0.2, 0.8, 0.8))
 
 
-def play(schedule, throws, use_cnn=False, offset=0.0):
+def play(schedule, throws, use_cnn=False, offset=0.0, robot_plays="win"):
     """
     A player who pumps on the pump beats and throws `throws[n]` on round n's throw beat (None = takes
     the hand away instead). Returns (engine, poses sent).
     """
-    eng = DecisionEngine(DecisionConfig(mode="guided"), VoteConfig(k=2, min_confidence=0.7), use_cnn=use_cnn,
-                         use_mp=True)
+    eng = DecisionEngine(DecisionConfig(mode="guided", robot_plays=robot_plays), VoteConfig(k=2, min_confidence=0.7),
+                         use_cnn=use_cnn, use_mp=True)
     eng.start_guided(schedule, offset)
     poses = []
     t_end = schedule.end_time + 0.5

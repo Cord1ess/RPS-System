@@ -17,6 +17,7 @@ import sys
 import time
 
 import cv2
+import numpy as np
 
 from rps.camera import open_source
 from rps.config import load_config
@@ -58,6 +59,8 @@ def main():
     parser.add_argument("--recognizer", choices=list(RECOGNIZERS), default=None)
     parser.add_argument("--mode", choices=["countdown", "guided", "continuous"], default=None,
                         help="guided: rounds follow the beat guide's timing (the beat is only heard in the app)")
+    parser.add_argument("--robot-plays", choices=["win", "draw", "lose"], default=None,
+                        help="win: beats your throw; draw: copies it; lose: plays what it beats")
     parser.add_argument("--video", default=None, help="Replay a recording directory instead of the camera")
     parser.add_argument("--mock-camera", action="store_true")
     parser.add_argument("--mock-esp", action="store_true", help="Simulated robot on this computer")
@@ -70,6 +73,8 @@ def main():
     cfg = load_config(args.config, args.set)
     if args.mode:
         cfg.decision.mode = args.mode
+    if args.robot_plays:
+        cfg.decision.robot_plays = args.robot_plays
     recognizer = args.recognizer or cfg.decision.recognizer
     cnn, hand = build_models(cfg, recognizer)
     effective = " + ".join(n for n, on in ((reader_name("cnn", cnn), cnn), ("Mediapipe", hand)) if on)
@@ -92,10 +97,11 @@ def main():
     show = args.headless <= 0
     if show:
         cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
-    print(f"[play] {RECOGNIZERS[recognizer]} (running: {effective}), mode {cfg.decision.mode}. "
-          f"Keys: q quit, m mode, r reset.")
+    print(f"[play] {RECOGNIZERS[recognizer]} (running: {effective}), mode {cfg.decision.mode}, robot plays to "
+          f"{cfg.decision.robot_plays}. Keys: q quit, m mode, r reset.")
 
     frames = 0
+    laptop_ms = []                          # per decision: first frame showing the throw -> command sent
     try:
         while True:
             frame = source.read(timeout=2.0)
@@ -108,6 +114,15 @@ def main():
             result = pipeline.step(frame, source.roi)
             log.add(pipeline.log_record(result))
             frames += 1
+            d = result.decision
+            if d is not None:
+                total = d.software_ms
+                if total is not None:
+                    laptop_ms.append(total)
+                print(f"[play] {GESTURE_NAME[d.gesture]} read by {reader_name(d.source, cnn)} -> robot {d.pose}: "
+                      f"reading {d.read_ms:.0f} ms ({d.frames} frames) + processing and send "
+                      + ("-" if d.process_ms is None else f"{d.process_ms:.0f} ms")
+                      + ("" if total is None else f" = {total:.0f} ms on the laptop"))
             if args.headless and frames >= args.headless:
                 break
             if not show:
@@ -148,6 +163,9 @@ def main():
         s = log.summary()
         print("\n================ SESSION SUMMARY ================")
         print(f"  frames: {frames}   camera fps: {s.get('fps', 0):.1f}")
+        if laptop_ms:
+            print(f"  throw read and sent (laptop): median {float(np.median(laptop_ms)):.0f} ms, "
+                  f"fastest {min(laptop_ms):.0f} ms, slowest {max(laptop_ms):.0f} ms over {len(laptop_ms)} throws")
         for key in ("dvs_ms", "cnn_ms", "mp_ms", "total_ms", "grab_to_send_ms"):
             if f"{key}_mean" in s:
                 print(f"  {key:16s} mean {s[f'{key}_mean']:6.2f}   p95 {s[f'{key}_p95']:6.2f}")

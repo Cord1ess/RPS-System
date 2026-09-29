@@ -78,6 +78,16 @@ class MainWindow(QMainWindow):
             self.tabs.blockSignals(False)
         self._tab_changed(start)
 
+    def open_page(self, name: str) -> bool:
+        """Shows a page by name ("play", "play debug", "bot", ...), ignoring numbers, case and dashes."""
+        def key(text):
+            return " ".join(w for w in text.lower().replace("-", " ").replace("_", " ").split() if not w.isdigit())
+        for i, page in enumerate(self.pages):
+            if key(page.title) == key(name) or key(page.title).split()[0] == key(name):
+                self.tabs.setCurrentIndex(i)
+                return True
+        return False
+
     # ------------------------------------------------------------------ camera ownership
     def start_camera(self, kind: str = None, video: str = None):
         """Starts the camera. Without arguments, reopens the source last chosen on Setup."""

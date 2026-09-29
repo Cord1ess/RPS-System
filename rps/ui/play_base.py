@@ -1,7 +1,8 @@
 """
 What the Play and Play Debug pages share: loading the recognizer in the background, the robot
 connection (set on Bot tuning), running the pipeline on camera frames, each reader's answer on the
-video, the delay graph, the Dextra view and Mediapipe cards, and the beat guide.
+video, the delay graph, the Dextra view and Mediapipe cards, the beat guide, and the per-throw
+speed card (rps.ui.delay_view: how fast each throw was read and sent).
 
 Names used everywhere: Dextra Raw, Dextra Tuned, Mediapipe, Both (Dextra Tuned + Mediapipe).
 Each reader has one colour: violet = Dextra, cyan = Mediapipe.
@@ -20,7 +21,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QComboBox, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QProgressBar, QVBoxLayout, QWidget
 
 from model import CLASS_NAMES
-from rps.decision import GESTURE_NAME
+from rps.decision import GESTURE_NAME, READY
 from rps.game import ENDLESS_ROUNDS, BeatSchedule
 from rps.hud import draw_hand, draw_label, draw_roi
 from rps.pipeline import RECOGNIZERS, Pipeline, load_models, missing_reason, reader_name
@@ -28,6 +29,7 @@ from rps.robot_link import ESP_RST_BROWNOUT, MockEsp, RobotLink
 from rps.timing import LatencyLog
 from rps.ui.base import Tab
 from rps.ui.common import LogView, select_data, to_pixmap
+from rps.ui.delay_view import DelayCard, throw_delay
 from rps.ui.sound import BeatPlayer
 from rps.ui.style import (BORDER, GESTURE_COLOR, MOTION_COLOR, MUTED, PANEL, TRACKER_COLOR, Card, Chip, caption,
                           label, static_plot, tip)
@@ -127,6 +129,8 @@ class PlayBase(Tab):
         self._beat_pending = False               # guided: the beat starts with the first processed frame
         self._camera_error = None                # the camera failed while the models loaded
         self.beats = BeatPlayer(self)
+        self.decisions = deque()                 # (DecisionTiming, robot's move before it), camera -> UI thread
+        self._robot_pose = READY                 # what the robot hand shows now (camera thread)
         self.log = LogView(500)
         self.models_ready.connect(self._models_loaded)
         main.worker.state_changed.connect(self._camera_state)
@@ -148,6 +152,10 @@ class PlayBase(Tab):
                         ("Camera interval", "#9aa3ad"))}
         self.series = {k: deque(maxlen=150) for k in self.curves}
         return self.plot
+
+    def make_delay_card(self, table: bool = False) -> DelayCard:
+        self.delay_card = DelayCard(table=table)
+        return self.delay_card
 
     def make_chips(self) -> QHBoxLayout:
         self.chip_cam = Chip("Camera off", "off", "Camera frames per second. 27 or more is good.")
@@ -300,6 +308,10 @@ class PlayBase(Tab):
             self.mediapipe_card.setEnabled(hand is not None)
         self._start_robot()
         self.latency = LatencyLog()
+        self.decisions.clear()
+        self._robot_pose = READY
+        if hasattr(self, "delay_card"):
+            self.delay_card.reset()
         self._rebuild = False
         self.schedule = None
         self.guided = self._beat_pending = self.state.cfg.decision.mode == "guided"
@@ -447,6 +459,7 @@ class PlayBase(Tab):
             self.cnn.rotate = int(self.state.cfg.cnn.rotate) % 360
             self.cnn.flip = bool(self.state.cfg.cnn.flip)
         r = pipeline.step(frame, src.roi)
+        self._track_robot(r)
         rec = pipeline.log_record(r)
         self.latency.add(rec)
         now = time.perf_counter()
@@ -462,6 +475,23 @@ class PlayBase(Tab):
                 "cnn_probs": r.cnn[2] if r.cnn is not None else None,
                 "cnn_input": self.cnn.orient(r.dvs_frame.image) if (self.cnn and r.dvs_frame is not None) else None,
                 "total_ms": self.latency.mean("total_ms")}
+
+    def _track_robot(self, r):
+        """Follows what the hand shows (the team firmware keeps its last move on READY) and queues each
+        decision with the move the hand came from, for its move time."""
+        came_from = None
+        for pose, _t in r.poses:
+            if r.decision is not None and came_from is None and pose == r.decision.pose:
+                came_from = self._robot_pose
+            if pose != READY or self.state.cfg.robot.protocol == "ack":
+                self._robot_pose = pose
+        if r.decision is not None:
+            self.decisions.append((r.decision, came_from if came_from is not None else self._robot_pose))
+
+    def on_decision(self, delay):
+        """A throw was decided (rps.ui.delay_view.ThrowDelay)."""
+        if hasattr(self, "delay_card"):
+            self.delay_card.add(delay)
 
     def _draw_readers(self, img, roi, hand, now):
         """Each reader's own answer on the video, in its colour, so the two are never confused."""
@@ -484,6 +514,9 @@ class PlayBase(Tab):
     # ------------------------------------------------------------------ UI thread
     def on_frame(self, p):
         self.view.show_image(p["display"])
+        while self.decisions:                    # every decision, even if its frame's picture was skipped
+            timing, came_from = self.decisions.popleft()
+            self.on_decision(throw_delay(timing, came_from, self.state.cfg, self.cnn))
         now = time.perf_counter()
         fps = p.get("fps", 0.0)
         if not p.get("running"):

@@ -1,0 +1,11 @@
+# Running only (app.py and play.py: camera, Dextra, Mediapipe, robot link), e.g. on a Raspberry Pi 5.
+# Training and evaluation charts need requirements.txt instead (it adds scikit-learn and matplotlib).
+# Raspberry Pi: use Raspberry Pi OS "Trixie" (64-bit). PySide6's Linux ARM build needs glibc 2.39+,
+# which the older "Bookworm" (2.36) does not have.
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements-run.txt
+# Do not add opencv-python: mediapipe installs opencv-contrib-python, and two cv2 packages conflict.
+mediapipe>=1.0.1
+numpy>=2.0
+torch>=2.4            # CPU build; Dextra is a tiny network
+PySide6>=6.6
+pyqtgraph>=0.13

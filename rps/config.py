@@ -18,7 +18,9 @@ class CameraConfig:
     # Defaults suit a dim room; run tools/camera_probe.py --write-config in the play lighting.
     # The FHD Camera has no gain control: a locked exposure only works with a well-lit play zone.
     index: int = 0
-    backend: str = "msmf"           # "dshow" | "msmf" | "any"
+    url: str = ""                   # an IP camera (rtsp://... or http://... MJPEG) instead of the USB camera at index
+    backend: str = "msmf"           # "msmf" | "dshow" (Windows) | "v4l2" (Linux, e.g. Raspberry Pi) | "any";
+                                    # the Windows drivers become v4l2 on Linux
     width: int = 640
     height: int = 480
     fps: int = 30
@@ -91,6 +93,7 @@ class VoteConfig:
 class DecisionConfig:
     mode: str = "countdown"         # "countdown" | "guided" (beat guide) | "continuous"
     recognizer: str = "both"        # "dextra_raw" | "dextra_tuned" | "mediapipe" | "both" (Dextra Tuned + Mediapipe)
+    robot_plays: str = "win"        # "win" (beats the throw) | "draw" (copies it) | "lose" (plays what it beats)
     active_events_per_frame: int = 100   # webcam-frame events above this -> motion active
     still_events_per_frame: int = 40     # webcam-frame events below this -> still
     still_frames: int = 2           # consecutive still frames -> motion stopped ("settled")
@@ -146,6 +149,7 @@ class GameConfig:
 class LatencyConfig:
     # Used by replay_eval.py to project when the robot pose becomes visible.
     camera_latency_ms: float = 50.0      # replace with the mirror-test measurement
+    network_ms: float = 0.0              # one-way Wi-Fi delay to the robot (half the ping time); 0 = not measured
     servo_transition_ms: Dict[str, float] = field(default_factory=lambda: {
         "N>R": 150.0, "N>P": 150.0, "N>S": 150.0,
         "R>P": 150.0, "R>S": 150.0, "P>R": 150.0,
@@ -172,11 +176,12 @@ class Config:
 
 # Fields that only accept these values (the UI shows them as drop-downs).
 ALLOWED: Dict[tuple, tuple] = {
-    ("camera", "backend"): ("msmf", "dshow", "any"),
+    ("camera", "backend"): ("msmf", "dshow", "v4l2", "any"),
     ("cnn", "rotate"): (0, 90, 180, 270),
     ("vote", "method"): ("sequence", "majority"),
     ("decision", "mode"): ("countdown", "guided", "continuous"),
     ("decision", "recognizer"): ("both", "dextra_raw", "dextra_tuned", "mediapipe"),
+    ("decision", "robot_plays"): ("win", "draw", "lose"),
     ("decision", "idle_action"): ("ready", "hold"),
     ("robot", "mode"): ("real", "simulated", "off"),
     ("robot", "protocol"): ("rps_text", "ack"),

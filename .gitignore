@@ -16,8 +16,10 @@ dextra-roshambo-python/
 # Raw recordings and generated frames (large; back them up separately)
 data/
 
-# Downloadable model assets
+# Model files. Mediapipe's hand model (Google, Apache 2.0) is committed so a fresh clone runs;
+# see SETUP_GUIDE.md for the ones that are not (Dextra: download or copy them)
 models/*.task
+!models/hand_landmarker.task
 # Dextra weights and samples: the upstream repo has no license, so do not redistribute
 models/dextra/
 # Trained and tuned model files: tuned ones are built from Dextra's weights (same reason), and

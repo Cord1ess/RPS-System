@@ -6,8 +6,9 @@ tempo, both volumes, count-in, beats between rounds and sound delay are set here
 previews it without the camera, and the volumes can be changed during a match. The camera, the
 delay graph and the Dextra view stay visible; everything else is on Play Debug.
 
-Scoring: the robot answers every throw it reads with the winning move, so it scores the round.
-A round where no throw was read in time goes to you.
+Robot plays to win (the move that beats your throw), to draw (the same move) or to lose (the move
+your throw beats); each round is scored from the two moves. A round where no throw was read in
+time goes to you. The Speed card shows how fast each throw was read and sent (rps.ui.delay_view).
 """
 
 import time
@@ -16,17 +17,17 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QRadioButton, QScrollArea, QSlider, QSpinBox, QVBoxLayout, QWidget)
 
-from rps.decision import GESTURE_NAME
+from rps.decision import DRAW, GESTURE_NAME, ROBOT, ROBOT_POSE, YOU, outcome
 from rps.game import ENDLESS_ROUNDS, BeatSchedule
 from rps.pipeline import RECOGNIZERS, reader_name
 from rps.ui.common import VideoView, select_data
+from rps.ui.fields import CHOICES
 from rps.ui.play_base import POSE_GESTURE, Metric, PlayBase, recognizer_combo, refresh_recognizers
 from rps.ui.sound import SOUNDS, BeatPlayer
 from rps.ui.style import (GESTURE_COLOR, MUTED, OK, WARN, Card, Collapsible, button, caption, label, page_header,
                           set_kind, tip)
 
 CUE_STYLE = "font-size:40pt; font-weight:800; color:{};"
-YOU, ROBOT = "you", "robot"
 
 
 def percent_slider(tooltip: str):
@@ -48,7 +49,7 @@ class GameTab(PlayBase):
 
     def __init__(self, main):
         super().__init__(main)
-        self.results = []                  # per round: (winner, your gesture or None, robot pose)
+        self.results = []                  # per round: (winner, your gesture or None, robot pose or None)
         self._seen_commits = self._seen_misses = 0
         self._last_round = -1
         self._last_snap = None
@@ -64,11 +65,12 @@ class GameTab(PlayBase):
         bl = QHBoxLayout(board)
         bl.setContentsMargins(18, 10, 18, 10)
         bl.setSpacing(34)
-        self.m_robot_score = Metric("Robot", "Rounds the robot won: it read your throw and answered with the winning "
-                                             "move.", big=True)
-        self.m_you_score = Metric("You", "Rounds you won: the robot did not read a throw in time.", big=True)
+        self.m_robot_score = Metric("Robot", "Rounds the robot won: its move beat your throw.", big=True)
+        self.m_you_score = Metric("You", "Rounds you won: your throw beat the robot's move, or no throw was read in "
+                                         "time.", big=True)
+        self.m_draws = Metric("Draws", "Rounds where the robot showed the same move as you.", big=True)
         self.m_round = Metric("Round", "Round being played, of the match length (endless: until Stop).", big=True)
-        for m in (self.m_robot_score, self.m_you_score, self.m_round):
+        for m in (self.m_robot_score, self.m_you_score, self.m_draws, self.m_round):
             bl.addWidget(m)
         bl.addStretch(1)
         self.cue = QLabel("Press Start")
@@ -86,7 +88,8 @@ class GameTab(PlayBase):
         left.addWidget(board)
         left.addWidget(self.result_line)
         left.addWidget(self.view, 1)
-        left.addWidget(self.make_delay_plot(110))
+        left.addWidget(self.make_delay_card())
+        left.addWidget(self.make_delay_plot(90))
         left.addLayout(self.make_chips())
 
         # ---------------- match options
@@ -100,6 +103,13 @@ class GameTab(PlayBase):
         self.recognizer.currentIndexChanged.connect(self._options_changed)
         g.addWidget(label("Recognition", self.recognizer.toolTip()), 0, 0)
         g.addWidget(self.recognizer, 0, 1)
+        self.robot_plays = tip(QComboBox(), "To win: the robot shows the move that beats your throw. To draw: the "
+                                            "same move as you. To lose: the move your throw beats.")
+        for key, text in CHOICES[("decision", "robot_plays")]:
+            self.robot_plays.addItem(text, key)
+        self.robot_plays.currentIndexChanged.connect(self._options_changed)
+        g.addWidget(label("Robot plays", self.robot_plays.toolTip()), 1, 0)
+        g.addWidget(self.robot_plays, 1, 1)
         rounds = QHBoxLayout()
         self.rounds5 = tip(QRadioButton("5"), "A match of 5 rounds.")
         self.rounds10 = tip(QRadioButton("10"), "A match of 10 rounds.")
@@ -110,18 +120,18 @@ class GameTab(PlayBase):
             rounds.addWidget(b)
             b.toggled.connect(self._options_changed)
         rounds.addStretch(1)
-        g.addWidget(label("Rounds", "Match length."), 1, 0)
-        g.addLayout(rounds, 1, 1)
+        g.addWidget(label("Rounds", "Match length."), 2, 0)
+        g.addLayout(rounds, 2, 1)
         self.pumps = tip(QSpinBox(), "Pumps before the throw. With the beat guide: the loud hits before SHOOT.")
         self.pumps.setRange(1, 4)
         self.pumps.valueChanged.connect(self._options_changed)
-        g.addWidget(label("Pumps", self.pumps.toolTip()), 2, 0)
-        g.addWidget(self.pumps, 2, 1)
+        g.addWidget(label("Pumps", self.pumps.toolTip()), 3, 0)
+        g.addWidget(self.pumps, 3, 1)
         self.guide = tip(QCheckBox("Beat guide"), "A beat leads the game: the steady beat keeps the tempo, louder "
                                                  "hits are your pumps (3, 2, 1) and a double hit is SHOOT: throw. "
                                                  "Off: pump at your own pace; pumps are counted from your hand.")
         self.guide.toggled.connect(self._options_changed)
-        g.addWidget(self.guide, 3, 0, 1, 2)
+        g.addWidget(self.guide, 4, 0, 1, 2)
         self.guide_box = QWidget()
         gg = QGridLayout(self.guide_box)
         gg.setContentsMargins(0, 0, 0, 0)
@@ -160,7 +170,7 @@ class GameTab(PlayBase):
                                                           "with these settings. No camera or robot needed.")
         self.preview_btn.clicked.connect(self._preview_toggle)
         gg.addWidget(self.preview_btn, 5, 0, 1, 2, Qt.AlignmentFlag.AlignLeft)
-        g.addWidget(self.guide_box, 4, 0, 1, 2)
+        g.addWidget(self.guide_box, 5, 0, 1, 2)
         match.body.addWidget(self.options)
         # the volumes stay here during a match, so they can be set while playing
         self.volume_box = QWidget()
@@ -217,6 +227,7 @@ class GameTab(PlayBase):
             refresh_recognizers(self.recognizer, cfg)
             select_data(self.recognizer, cfg.decision.recognizer)
             refresh_recognizers(self.recognizer, cfg)
+            select_data(self.robot_plays, cfg.decision.robot_plays)
             g = cfg.game
             length = self.rounds_endless if g.rounds <= 0 else self.rounds10 if g.rounds >= 10 else self.rounds5
             length.setChecked(True)
@@ -260,6 +271,7 @@ class GameTab(PlayBase):
         if self._loading_options or self.pipeline is not None or self._loading:
             return
         self._write({("decision", "recognizer"): self.recognizer.currentData(),
+                     ("decision", "robot_plays"): self.robot_plays.currentData(),
                      ("game", "rounds"): self.rounds(),
                      ("decision", "pumps_before_shoot"): self.pumps.value(),
                      ("decision", "mode"): "guided" if guided else "countdown",
@@ -333,7 +345,8 @@ class GameTab(PlayBase):
         self.summary.setVisible(True)
         guide = "beat guide" if self.guided else "own pace"
         length = f"{self.rounds()} rounds" if self.rounds() else "endless"
-        self.summary.setText(f"{RECOGNIZERS[self.recognizer_key()]} · {length} · "
+        plays = self.robot_plays.currentText().split(" (")[0].lower()
+        self.summary.setText(f"{RECOGNIZERS[self.recognizer_key()]} · robot plays {plays} · {length} · "
                              f"{self.state.cfg.decision.pumps_before_shoot} pumps · {guide}")
         self.result_line.setText("")
         self._set_cue("Waiting for camera" if self.guided else "Pump!", "#e4e7eb" if not self.guided else MUTED)
@@ -364,16 +377,17 @@ class GameTab(PlayBase):
         self.show_readers(self.recognizer_key())
 
     def _final_text(self) -> str:
-        robot, you = self._score()
+        robot, you, _draws = self._score()
         return "Robot wins" if robot > you else ("You win" if you > robot else "Draw")
 
     def _score(self):
-        return sum(1 for w, *_ in self.results if w == ROBOT), sum(1 for w, *_ in self.results if w == YOU)
+        return tuple(sum(1 for w, *_ in self.results if w == who) for who in (ROBOT, YOU, DRAW))
 
     def _show_score(self):
-        robot, you = self._score()
+        robot, you, draws = self._score()
         self.m_robot_score.set(str(robot), "#e4e7eb")
         self.m_you_score.set(str(you), "#e4e7eb")
+        self.m_draws.set(str(draws), "#e4e7eb")
         current = str(min(len(self.results) + 1, self._limit())) if self.pipeline is not None else "-"
         self.m_round.set(f"{current} / {self.rounds()}" if self.rounds() else current, "#e4e7eb")
 
@@ -382,17 +396,21 @@ class GameTab(PlayBase):
             self.cue.setText(text)
         self.cue.setStyleSheet(CUE_STYLE.format(color))
 
-    def _record(self, winner: str, gesture, pose: str, source: str):
-        self.results.append((winner, gesture, pose))
-        if winner == ROBOT:
-            you = GESTURE_NAME.get(gesture, "?")
-            robot = POSE_GESTURE.get(pose, "?")
-            self._set_cue(f"{robot.upper()}", GESTURE_COLOR.get(robot, "#e4e7eb"))
-            self.result_line.setText(f"Round {len(self.results)}: you threw {you}, the robot played {robot} "
-                                     f"(read by {source}).")
-        else:
+    def _record(self, gesture, source: str):
+        """Scores a round from your throw (None: none was read in time, your point) and the robot's move."""
+        if gesture is None:
+            self.results.append((YOU, None, None))
             self._set_cue("Missed", WARN)
             self.result_line.setText(f"Round {len(self.results)}: no throw was read in time. Your point.")
+        else:
+            pose = ROBOT_POSE[self.state.cfg.decision.robot_plays][gesture]
+            winner = outcome(gesture, pose)
+            self.results.append((winner, gesture, pose))
+            you, robot = GESTURE_NAME.get(gesture, "?"), POSE_GESTURE.get(pose, "?")
+            self._set_cue(f"{robot.upper()}", GESTURE_COLOR.get(robot, "#e4e7eb"))
+            point = {ROBOT: "robot's point", YOU: "your point", DRAW: "draw"}[winner]
+            self.result_line.setText(f"Round {len(self.results)}: you threw {you}, the robot played {robot} "
+                                     f"(read by {source}): {point}.")
         self._show_score()
         if len(self.results) >= self._limit() and not self.guided:
             self.stop_run()                          # own pace: the match ends with its last round
@@ -422,8 +440,7 @@ class GameTab(PlayBase):
             return
         end = self._limit() if upto is None else min(upto, self._limit())
         for n in range(len(self.results), end):
-            g = (s.round_results or {}).get(n)
-            self._record(ROBOT if g is not None else YOU, g, s.pose, reader_name(s.source, self.cnn) or "-")
+            self._record((s.round_results or {}).get(n), reader_name(s.source, self.cnn) or "-")
 
     # ------------------------------------------------------------------ results, from the decision engine
     def on_frame_ui(self, p, now):
@@ -434,15 +451,14 @@ class GameTab(PlayBase):
             self._finish_rounds(s, upto=s.round)                     # rounds that ended since the last frame
             if 0 <= s.round < self._limit() and len(self.results) == s.round \
                     and s.round in s.round_results:                  # decided or missed: show it at once
-                g = s.round_results[s.round]
-                self._record(ROBOT if g is not None else YOU, g, s.pose, source)
+                self._record(s.round_results[s.round], source)
             return
         while self._seen_commits < s.commits:
             self._seen_commits += 1
-            self._record(ROBOT, s.human, s.pose, source)
+            self._record(s.human, source)
         while self._seen_misses < s.misses:
             self._seen_misses += 1
-            self._record(YOU, None, s.pose, source)
+            self._record(None, source)
         if self.pipeline is not None and s.state == "ARMED":
             self._set_cue(f"Pump {s.pumps}" if s.pumps else "Pump!", "#e4e7eb")
         elif self.pipeline is not None and s.state == "SHOOT":

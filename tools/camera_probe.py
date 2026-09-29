@@ -26,10 +26,11 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from rps.camera import is_repeat  # noqa: E402
+from rps.camera import BACKENDS, fourcc_for, is_repeat, set_auto_exposure, set_manual_exposure  # noqa: E402
 from rps.config import load_config, save_config  # noqa: E402
 
-BACKENDS = {"dshow": cv2.CAP_DSHOW, "msmf": cv2.CAP_MSMF}
+PROBE_BACKENDS = ("dshow", "msmf") if sys.platform == "win32" else ("v4l2",)   # Linux: e.g. a Raspberry Pi
+LOCKABLE = ("dshow", "v4l2")          # Media Foundation ignores exposure writes on the demo laptop's driver
 LOCKED_EXPOSURES = (-5, -6, -7)
 MIN_FPS = 28.0
 MIN_BRIGHTNESS = 60.0
@@ -39,7 +40,7 @@ def open_mode(index, backend, width=640, height=480, fps=30, fourcc="YUY2"):
     cap = cv2.VideoCapture(index, BACKENDS[backend])
     if not cap.isOpened():
         return None
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc_for(backend, fourcc)))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
     cap.set(cv2.CAP_PROP_FPS, fps)
@@ -100,7 +101,7 @@ def main():
     print("  CAMERA PROBE  (YUY2 640x480; keep the play zone lit exactly as it will be during play)")
     print("=" * 86)
     rows = []  # (backend, locked, exposure, metrics)
-    for backend in ("dshow", "msmf"):
+    for backend in PROBE_BACKENDS:
         cap = open_mode(index, backend)
         if cap is None:
             print(f"  {backend}: cannot open camera")
@@ -110,16 +111,15 @@ def main():
             rows.append((backend, False, None, m))
             print(f"  {backend:5s} auto exposure     : {m['fps']:5.1f} fps (p90 dt {m['p90_ms']:5.1f} ms), "
                   f"brightness {m['brightness']:6.1f}")
-            if backend == "dshow":   # MSMF ignores exposure writes on this driver
+            if backend in LOCKABLE:
                 for exp in LOCKED_EXPOSURES:
-                    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
-                    cap.set(cv2.CAP_PROP_EXPOSURE, exp)
+                    set_manual_exposure(cap, backend, exp)
                     m = measure(cap, args.seconds)
                     rows.append((backend, True, exp, m))
                     print(f"  {backend:5s} locked {exp:+d} ({1000 * 2.0 ** exp:4.1f} ms): {m['fps']:5.1f} fps "
                           f"(p90 dt {m['p90_ms']:5.1f} ms), brightness {m['brightness']:6.1f}, "
                           f"flicker ripple {m['ripple']:4.2f}%")
-                cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)
+                set_auto_exposure(cap, backend)
         finally:
             cap.release()
 

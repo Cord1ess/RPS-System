@@ -13,8 +13,14 @@ Fusion rules ("Both")
 - Hysteresis (dead time) applies to Mediapipe-driven switches and to A->B->A flips only.
 - A background vote never changes the command (Dextra behaviour).
 
+What the robot plays (decision.robot_plays): "win" shows the move that beats the player's throw,
+"draw" copies it, "lose" shows the move it beats. Every mode below works with each of them.
+
+Every decision records when its throw was first seen on camera (Decision.t_first) and the frame it
+was decided on (t_frame), so the app can show how long reading the hand took.
+
 Game modes
-- continuous: the robot always shows the counter to the current decision.
+- continuous: the robot always answers the current decision.
 - countdown: IDLE -> ARMED (count pumps) -> SHOOT -> HOLD. Pumps come from rps.motion's
   PumpDetector, which learns the player's pump size and tempo. An open hand after enough pumps is
   the throw; rock (the pumping fist) commits once the throw has landed.
@@ -34,12 +40,33 @@ from rps.voting import make_voter
 
 READY = "N"
 POSE_LETTER = {"rock": "R", "paper": "P", "scissors": "S"}
-COUNTER_POSE = {g: POSE_LETTER[COUNTER_MOVES[g]] for g in (ROCK, PAPER, SCISSORS)}
 GESTURE_NAME = {ROCK: "rock", PAPER: "paper", SCISSORS: "scissors", BACKGROUND: "background", -1: "unknown"}
+COUNTER_POSE = {g: POSE_LETTER[COUNTER_MOVES[g]] for g in (ROCK, PAPER, SCISSORS)}      # beats the throw
+SAME_POSE = {g: POSE_LETTER[GESTURE_NAME[g]] for g in (ROCK, PAPER, SCISSORS)}           # copies it
+LOSING_POSE = {ROCK: "S", PAPER: "R", SCISSORS: "P"}                                     # what the throw beats
+ROBOT_POSE = {"win": COUNTER_POSE, "draw": SAME_POSE, "lose": LOSING_POSE}
 
 IDLE, ARMED, SHOOT, HOLD = "IDLE", "ARMED", "SHOOT", "HOLD"
+ROBOT, YOU, DRAW = "robot", "you", "draw"
 TRACKER_FRESH_S = 0.1    # a Mediapipe reading older than this cannot block a Dextra vote
 SETTLE_MIN_S = 0.45      # after a decision, low points this soon (or within 1.2 beats) are the throw settling
+
+
+def outcome(gesture: int, pose: str) -> str:
+    """Who won a round: ROBOT, YOU or DRAW, from the player's throw and the robot's move."""
+    if pose == COUNTER_POSE[gesture]:
+        return ROBOT
+    return DRAW if pose == SAME_POSE[gesture] else YOU
+
+
+@dataclass
+class Decision:
+    """One decision and when its evidence appeared, on the camera clock."""
+    gesture: int
+    pose: str                                   # the robot's move for it
+    source: str                                 # "cnn" (Dextra) | "mp" (Mediapipe)
+    t_first: float                              # first camera frame that showed the throw (rock: when it landed)
+    t_frame: float                              # the camera frame it was decided on
 
 
 @dataclass
@@ -70,6 +97,7 @@ class Snapshot:
     round: int = -1                             # guided: the round being played
     round_results: Optional[dict] = None        # guided: round -> gesture, or None when no throw was seen
     misses: int = 0                             # countdown: rounds that ended without a decision
+    decision: Optional[Decision] = None         # the latest decision
 
 
 class DecisionEngine:
@@ -109,6 +137,10 @@ class DecisionEngine:
         self.cnn_rock_t = -1e9
         self.mp_gesture: Optional[int] = None
         self.mp_since_t = self.mp_last_t = -1e9      # first and latest image of the current Mediapipe gesture
+        self.cnn_run_label: Optional[int] = None
+        self.cnn_since = {}                     # label -> first frame of Dextra's latest run of that answer
+        self.throw_t: Optional[float] = None    # when the throw landed (the hand stopped at its low point)
+        self.last_decision: Optional[Decision] = None
         self.last_hand_t = -1e9
         self.mp_present = False
         # countdown
@@ -140,7 +172,7 @@ class DecisionEngine:
         return Snapshot(self.mode, "LIVE" if self.mode == "continuous" else self.state, self.pose, self.human,
                         self.last_source, self.motion_active, self.pumps, self.switches, self.commits,
                         self.cnn_vote, self.mp_gesture, self.reason, self.pump.tempo, self.round,
-                        dict(self.round_results), self.misses)
+                        dict(self.round_results), self.misses, self.last_decision)
 
     def on_motion(self, obs: MotionObs) -> Optional[str]:
         t = obs.t
@@ -148,6 +180,9 @@ class DecisionEngine:
         self._update_motion(obs)
         vote = None
         if obs.cnn is not None and self.use_cnn:
+            if obs.cnn[0] != self.cnn_run_label:          # Dextra starts seeing something new
+                self.cnn_run_label = obs.cnn[0]
+                self.cnn_since[obs.cnn[0]] = t
             vote = self.voter.update(obs.cnn[0], obs.cnn[1], t)
             if vote is not None and self._tracker_contradicts(vote, t):
                 vote = None
@@ -212,7 +247,8 @@ class DecisionEngine:
 
     def _mp_stable(self) -> bool:
         """The gesture held for mp_stable_ms: a time, not a frame count, so it means the same at any frame rate."""
-        return self.mp_gesture is not None and             self.mp_last_t - self.mp_since_t >= self.cfg.mp_stable_ms / 1000.0 - 1e-6
+        return self.mp_gesture is not None and \
+            self.mp_last_t - self.mp_since_t >= self.cfg.mp_stable_ms / 1000.0 - 1e-6
 
     def _tracker_contradicts(self, vote: int, t: float) -> bool:
         """
@@ -269,7 +305,31 @@ class DecisionEngine:
         if source == "cnn":
             self.last_cnn_commit_t = t
         self.reason = f"{GESTURE_NAME[gesture]} via {source}"
-        return self._set_pose(COUNTER_POSE[gesture])
+        pose = ROBOT_POSE.get(self.cfg.robot_plays, COUNTER_POSE)[gesture]
+        self.last_decision = Decision(gesture, pose, source, self._first_seen(gesture, source, t), t)
+        return self._set_pose(pose)
+
+    def _first_seen(self, gesture: int, source: str, t: float) -> float:
+        """The first camera frame on which the deciding reader showed this throw."""
+        since = self.mp_since_t if source == "mp" else self.cnn_since.get(gesture, t)
+        # In a round the throw cannot begin before its final stroke: a shape glimpsed during the pumps
+        # (a reader briefly misreading the fist) is not the throw.
+        if self.mode == "countdown":
+            since = max(since, self.pump.last_bottom_t)       # the last pump's low point
+        elif self.mode == "guided":
+            since = max(since, self.window_open_t)
+        if gesture == ROCK and self.mode != "continuous":
+            # A fist is shown all through the pumps: the rock throw is there once the hand has landed
+            # (or, if the landing was not seen, when the throw was due).
+            throw = self.throw_t
+            if throw is None:
+                s = self.schedule
+                if self.mode == "guided" and s is not None and 0 <= self.round < s.rounds:
+                    throw = s.shoot_time(self.round) + self.sync_offset_s
+                else:
+                    throw = self.shoot_t
+            since = max(since, throw)
+        return min(since, t)
 
     def _continuous_idle(self, t: float) -> Optional[str]:
         if self.human is not None and self.cfg.idle_action == "ready" and self._idle(t):
@@ -293,6 +353,7 @@ class DecisionEngine:
         if state == SHOOT:
             self.shoot_t = t
             self.shoot_landed = False
+            self.throw_t = None
         return None
 
     def _shoot_window(self) -> float:
@@ -318,7 +379,7 @@ class DecisionEngine:
                     self._enter(SHOOT, t, "throw")
             elif event == "landed" and enough:
                 self._enter(SHOOT, t, "throw landed")
-                self.shoot_landed = True
+                self.shoot_landed, self.throw_t = True, self.pump.ext_t
                 return self._shoot_decide(t, vote)
             elif self.pumps >= max(1, cfg.pumps_before_shoot - cfg.pump_miss_tolerance - 1) \
                     and self._open_hand(vote):
@@ -334,11 +395,11 @@ class DecisionEngine:
             if event == "bottom":                  # still pumping: the throw has not come yet
                 self.pumps += 1
                 self.last_bottom_t = t
-                self.shoot_t, self.shoot_landed = t, False
+                self.shoot_t, self.shoot_landed, self.throw_t = t, False, None
                 self.reason = f"pump {self.pumps}"
                 return None
             if event == "landed":
-                self.shoot_landed = True
+                self.shoot_landed, self.throw_t = True, self.pump.ext_t
             if t - self.shoot_t > self._shoot_window():
                 self.misses += 1
                 return self._enter(ARMED, t, "no throw seen")
@@ -391,12 +452,12 @@ class DecisionEngine:
                 self.reason = f"pump {self.pumps}"
             if te < shoot - cfg.guided_early_s:
                 return None
-            self.state, self.shoot_landed = SHOOT, False
+            self.state, self.shoot_landed, self.throw_t = SHOOT, False, None
             self.window_open_t = self.shoot_t = t
             self.reason = "throw"
         if self.state == SHOOT:
             if event == "landed":
-                self.shoot_landed = True
+                self.shoot_landed, self.throw_t = True, self.pump.ext_t
             if te > shoot + cfg.guided_late_s:    # the window closed without a readable throw
                 self.state, self.reason = HOLD, "no throw seen"
                 self.round_results[n] = None

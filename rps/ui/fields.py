@@ -9,8 +9,12 @@ display names for every choice. The app uses one name for each thing:
 FIELD_INFO = {
     # camera
     ("camera", "index"): ("Camera number", "0 = built-in webcam.", True),
+    ("camera", "url"): ("IP camera address", "rtsp://... or http://... (MJPEG) to use a network camera instead of "
+                        "the USB one; empty = USB camera. A USB camera is faster: network cameras add 100 ms or "
+                        "more of delay.", True),
     ("camera", "backend"): ("Capture driver", "Media Foundation: best in dim light. DirectShow: steady 30 fps with "
-                            "a locked exposure. Auto-configure chooses.", True),
+                            "a locked exposure. V4L2: Linux (Raspberry Pi); the Windows drivers become V4L2 there. "
+                            "Auto-configure chooses.", True),
     ("camera", "width"): ("Width", "Pixels. 640 is the fastest uncompressed mode on this camera.", True),
     ("camera", "height"): ("Height", "Pixels.", True),
     ("camera", "fps"): ("Frame rate", "Frames per second requested. This camera's maximum is 30.", True),
@@ -84,6 +88,8 @@ FIELD_INFO = {
                            "continuously.", False),
     ("decision", "recognizer"): ("Recognition", "Dextra Raw, Dextra Tuned, Mediapipe, or Both (Dextra Tuned + "
                                  "Mediapipe).", False),
+    ("decision", "robot_plays"): ("Robot plays", "To win: the move that beats your throw. To draw: the same move. "
+                                  "To lose: the move your throw beats.", False),
     ("decision", "active_events_per_frame"): ("Moving above", "Movement per camera frame that counts as the hand "
                                               "moving.", True),
     ("decision", "still_events_per_frame"): ("Still below", "Movement per camera frame that counts as still.", True),
@@ -156,12 +162,15 @@ FIELD_INFO = {
     # timing model
     ("latency", "camera_latency_ms"): ("Camera delay (ms)", "Measured with the camera delay test on the Setup "
                                        "page.", True),
+    ("latency", "network_ms"): ("Wi-Fi delay (ms)", "One-way delay to the robot: half the ping time, measured on "
+                                "Bot tuning. 0 = not measured.", True),
     ("latency", "servo_transition_ms"): ("Robot move times (ms)", "Time for the hand to move between poses; used "
                                          "by Evaluate to estimate when the robot's move is visible.", True),
 }
 
 CHOICES = {
-    ("camera", "backend"): [("msmf", "Media Foundation"), ("dshow", "DirectShow"), ("any", "Automatic")],
+    ("camera", "backend"): [("msmf", "Media Foundation (Windows)"), ("dshow", "DirectShow (Windows)"),
+                            ("v4l2", "V4L2 (Linux, Raspberry Pi)"), ("any", "Automatic")],
     ("camera", "fourcc"): [("YUY2", "YUY2 (uncompressed)"), ("MJPG", "MJPG (compressed)")],
     ("vote", "method"): [("sequence", "Same answer in a row"), ("majority", "Majority of recent answers")],
     ("decision", "mode"): [("countdown", "Countdown (pumps counted from your hand)"),
@@ -170,6 +179,8 @@ CHOICES = {
     ("decision", "recognizer"): [("dextra_raw", "Dextra Raw"), ("dextra_tuned", "Dextra Tuned"),
                                  ("mediapipe", "Mediapipe"), ("both", "Both (Dextra Tuned + Mediapipe)")],
     ("decision", "idle_action"): [("ready", "Return to ready"), ("hold", "Keep last move")],
+    ("decision", "robot_plays"): [("win", "To win (beats your throw)"), ("draw", "To draw (copies your throw)"),
+                                  ("lose", "To lose (plays what your throw beats)")],
     ("cnn", "rotate"): [(0, "0°"), (90, "90°"), (180, "180°"), (270, "270°")],
     ("robot", "mode"): [("real", "Real robot"), ("simulated", "Simulated robot"), ("off", "Off")],
     ("robot", "protocol"): [("rps_text", "Team firmware (RPS:ROCK, RPS:PAPER, RPS:SCISSORS)"),

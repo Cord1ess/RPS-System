@@ -240,7 +240,7 @@ def test_finger_angles_and_moves_share_one_socket_and_replies_come_back():
         assert link.send_raw(encode_angle(1, 120)) and link.send_raw(encode_angle(0, 0))
         link.send_pose("S")
         time.sleep(0.3)
-        assert said == ["OK ANGLE:1,120", "OK ANGLE:0,0"]              # the confirmations, in order
+        assert said == ["CONFIRM_ANGLE:ch=1(Index),deg=120", "CONFIRM_ANGLE:ch=0(Pinky + Ring),deg=0"]   # in order
         assert esp.angles == {1: 120, 0: 0} and esp.pose == "S"
     finally:
         link.stop()

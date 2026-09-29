@@ -13,8 +13,8 @@ from dataclasses import fields
 from typing import Dict, List, Optional
 
 import numpy as np
-from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
+from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QRect, Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QLabel, QLineEdit,
                                QPlainTextEdit, QSizePolicy, QSpinBox, QWidget)
 
@@ -87,6 +87,11 @@ class AppState(QObject):
         for f in fields(Config):
             setattr(self.cfg, f.name, getattr(new, f.name))
         self.mark_dirty()
+
+
+def open_folder(path: str) -> bool:
+    """Opens a folder in the file manager (Windows Explorer, or the Raspberry Pi's file manager)."""
+    return os.path.isdir(path) and QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(path)))
 
 
 def to_pixmap(img: np.ndarray) -> QPixmap:

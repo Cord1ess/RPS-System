@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout
 
 from rps.recorder import list_recordings
 from rps.ui.base import Tab
-from rps.ui.common import LogView, ProcessRunner, to_pixmap
+from rps.ui.common import LogView, ProcessRunner, open_folder, to_pixmap
 from rps.ui.style import Card, Collapsible, button, caption, label, page_header, row, tip
 
 BUILD_PROGRESS = re.compile(r"\[build\] \((\d+)/(\d+)\)")
@@ -202,8 +202,7 @@ class DatasetTab(Tab):
     def _open_folder(self):
         recs = self._selected_recs()
         path = recs[0]["dir"] if recs else self.state.recordings_root
-        if os.path.isdir(path):
-            os.startfile(os.path.abspath(path))
+        open_folder(path)
 
     # ------------------------------------------------------------------ build
     def _line(self, line: str):
