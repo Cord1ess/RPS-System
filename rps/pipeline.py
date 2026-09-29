@@ -99,7 +99,8 @@ def missing_reason(cfg: Config, recognizer: str) -> Optional[str]:
         return None
     if model == cfg.cnn.raw_model:
         return "Dextra Raw is not downloaded yet (Play Debug: Download Dextra)."
-    return "Dextra Tuned does not exist yet: tune Dextra on the Train page."
+    return (f"Dextra Tuned does not exist yet: tune Dextra on the Train page, or copy {model} from the "
+            f"computer that trained it.")
 
 
 def load_models(cfg: Config, recognizer: str) -> Tuple[object, object, List[str]]:

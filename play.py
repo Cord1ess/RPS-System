@@ -37,7 +37,8 @@ def build_models(cfg, recognizer):
     try:
         cnn, hand, messages = load_models(cfg, recognizer)
     except RuntimeError as e:
-        sys.exit(f"[play] {e}")
+        hint = "" if recognizer == "mediapipe" else " Or play with Mediapipe alone: --recognizer mediapipe"
+        sys.exit(f"[play] {e}{hint}")
     for msg in messages:
         print(f"[play] {msg}")
     return cnn, hand
