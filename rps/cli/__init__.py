@@ -1,0 +1,1 @@
+"""The command line: `python -m rps`, or `python rps.py`, for everything the desktop app does."""
