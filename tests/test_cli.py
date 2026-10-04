@@ -44,7 +44,11 @@ def test_no_arguments_prints_the_help_and_succeeds(capsys):
     assert "usage: rps" in capsys.readouterr().out
 
 
-def test_a_command_with_no_module_behind_it_says_so_instead_of_a_traceback(capsys):
+def test_a_command_with_no_module_behind_it_says_so_instead_of_a_traceback(capsys, monkeypatch):
+    import rps.cli.commands as commands
+
+    monkeypatch.setattr(commands, "COMMANDS", commands.COMMANDS + [("doctor", "not written yet",
+                                                                   "rps.cli.doctor")])
     assert main(["doctor"]) == 127          # nothing imports it when only the help is being printed
     assert "rps.cli.doctor" in capsys.readouterr().err
 

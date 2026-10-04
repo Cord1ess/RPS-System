@@ -69,7 +69,8 @@ def die(message: str, code: int = 1):
 
 def confirm(question: str, default: bool = True) -> bool:
     """Ask, with the answer in pink so it stands out from the question."""
-    answer = input(f"{theme.field(question)} [y/n] " if default else f"{theme.field(question)} [y/N] ").strip().lower()
+    theme.field(question)                              # prints the question; returns nothing
+    answer = input("[y/n] " if default else "[y/N] ").strip().lower()
     if not answer:
         return default
     return answer.startswith("y")
@@ -78,8 +79,11 @@ def confirm(question: str, default: bool = True) -> bool:
 def prompt(label: str, default: str = "", choices: Optional[List[str]] = None) -> str:
     """One question, one line. `default` is what an empty answer means."""
     hint = theme.choices(choices, default) if choices else (theme.dim(f"  [{default}]") if default else "")
+    if hint:
+        theme.out(hint)
+    theme.field(label)                                  # prints the question; returns nothing
     while True:
-        answer = input(f"{theme.field(label)} {hint} ").strip()
+        answer = input(" ").strip()
         if not answer and default:
             return default
         if answer or not choices:

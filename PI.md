@@ -37,12 +37,30 @@ Training tests (require scikit-learn/matplotlib):
 `
 
 ## 4. Quick CLI smoke checks
-`ash
+`bash
 .venv/bin/python -m rps --help
 .venv/bin/python -m rps config --section robot
 .venv/bin/python rps.py setup --mock-camera --seconds 1
 .venv/bin/python -m rps play --mock-camera --mock-esp --headless 50
 `
+
+## 4a. The menu (easier than typing long commands)
+`bash
+.venv/bin/python -m rps
+`
+With no arguments you get a menu: Setup, Bot, Config, Play, Status, Quit. Type the number, press
+Enter. It works over SSH (numbers only, no arrow keys) and Ctrl-C drops you back into the menu
+rather than out of it. The same commands still work typed, if you prefer:`bash
+.venv/bin/python -m rps menu          # the menu on purpose
+`
+
+What it remembers, in `data/menu_recent.json` (yours, not tracked by git): the recognizer, the mode,
+what the robot plays to, and whether the live HUD is on. So the next visit starts where you left off.
+
+Fastest check that the whole thing runs on the Pi, no camera and no robot needed:
+1. `4` Play
+2. `2` Quick test (mediapipe + simulated camera + simulated robot, 120 frames)
+3. It prints a summary and drops back to the menu.
 
 ## 5. Return to main
 `ash
@@ -77,7 +95,7 @@ The CLI shares the same runner as the OpenCV window. On a headless Pi over SSH, 
 `
 
 ### Mock (no camera/robot) - safe smoke tests
-`ash
+`bash
 # Text HUD (shows zone status, last gesture, recognizer, mode)
 .venv/bin/python -m rps play --recognizer mediapipe --mock-camera --mock-esp --mode continuous
 
@@ -87,6 +105,8 @@ The CLI shares the same runner as the OpenCV window. On a headless Pi over SSH, 
 # Headless N frames (good for SSH/CI)
 .venv/bin/python -m rps play --recognizer mediapipe --mock-camera --mock-esp --mode continuous --headless 100
 `
+
+Or from the menu, which does the same thing: `4` Play, then `2` Quick test.
 
 ### Real camera (no robot) - verify hand is inside the bounding box
 `ash

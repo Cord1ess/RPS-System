@@ -93,6 +93,27 @@ Heavy jobs (probe, build, train, evaluate, Dextra import) run the command-line s
 
 ## Workflow (command line)
 
+### The menu, or the commands
+
+Run with no arguments and you get a menu — Setup, Bot, Config, Play, Status, Quit. Type a number,
+press Enter. Numbers only, so it works over SSH on a Pi with nothing installed but Python, and
+Ctrl-C drops back into the menu rather than out of it.
+```bash
+python -m rps            # the menu (also: python rps.py)
+```
+It remembers the recognizer, the mode, what the robot plays to and whether the live HUD is on, in
+`data/menu_recent.json` (yours, not tracked by git), so the next visit starts where you left off.
+
+Every entry in the menu is the same code as the typed command, so use whichever you like:
+```bash
+python -m rps config --section robot     # the settings
+python -m rps setup check                # camera fps, light, is a hand in the zone
+python -m rps bot ping                   # Wi-Fi delay to the hand
+python -m rps play --recognizer mediapipe --no-hud --headless 100
+```
+Global flags (`--config`, `--data-root`, `--set`, `--json`, `--no-color`, `-q`, `-v`) work before or
+after the command name. `--json` prints one object instead of a screen of text.
+
 ### 0. Camera and play zone (do this in the real play lighting)
 1. Close OBS and anything else using the camera. Turn off Huawei PC Manager "AI camera" effects and any Windows camera effects (auto-framing or background blur change the whole image and flood the emulator).
 2. `python tools/camera_probe.py --write-config` picks the backend and exposure that give ≥ 28 fps at usable brightness.
@@ -162,9 +183,13 @@ python play.py --recognizer dextra_raw --mode continuous --set cnn.flip=true
 ### 5. Play
 In the app: **Play** for a match (beat guide optional), **Play Debug** to watch every reading. From the command line:
 ```powershell
-python play.py                                # the recognition, game and robot saved in config.json
-python play.py --recognizer both --mode continuous
+python -m rps play                            # the recognition, game and robot saved in config.json
+python -m rps play --recognizer both --mode continuous
 ```
+`rps play` shows a text HUD: whether the hand is inside the play zone, the camera fps, the last
+gesture and what the robot did, the last throw's timing, the raw Dextra/MediaPipe readings, and the
+mode and counters. `--no-hud` prints one line per decision instead, and `--headless N` runs N frames
+and prints a summary (good for SSH and CI). `python play.py` still works exactly as before.
 
 ---
 

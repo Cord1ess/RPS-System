@@ -46,8 +46,9 @@ def add_global_flags(parser: argparse.ArgumentParser, suppress: bool = False) ->
 
 
 def build_parser(only: str = None) -> argparse.ArgumentParser:
-    """The whole parser. With `only`, just that command's module is imported and its flags added,
-    so `--help` never has to import the commands it is only listing."""
+    """The whole parser. With `only`, that one command's module is imported and its flags added, so
+    `--help` never has to import the commands it is only listing, and one command that cannot be
+    imported does not take the whole listing down with it."""
     from rps.cli.commands import COMMANDS
 
     parser = argparse.ArgumentParser(
@@ -66,17 +67,30 @@ def build_parser(only: str = None) -> argparse.ArgumentParser:
         sub = subparsers.add_parser(name, help=description, description=description,
                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
         add_global_flags(sub, suppress=True)
-        if only is None or only == name:
+        if only != name:                          # the listing needs the name and the one line only
+            continue
+        try:
             module = importlib.import_module(module_name)
-            sub.set_defaults(func=getattr(module, "run"))
-            inherited = {id(action) for action in sub._actions}
-            register = getattr(module, "register", None)
-            if register is not None:
-                register(sub)
-            if only == name:
-                parser.own_flags = {opt for action in sub._actions if id(action) not in inherited
-                                    for opt in action.option_strings}
+        except ImportError as e:
+            sub.set_defaults(func=_unavailable(module_name, e))
+            continue
+        sub.set_defaults(func=getattr(module, "run"))
+        inherited = {id(action) for action in sub._actions}
+        register = getattr(module, "register", None)
+        if register is not None:
+            register(sub)
+        parser.own_flags = {opt for action in sub._actions if id(action) not in inherited
+                            for opt in action.option_strings}
     return parser
+
+
+def _unavailable(module_name: str, error: Exception):
+    """A command whose module will not import (an optional dependency, say). Say so in one line
+    rather than letting an ImportError reach the traceback handler."""
+    def run(args, ctx):
+        print(f"{theme.bad('command unavailable')}: {error}", file=sys.stderr)
+        return 127
+    return run
 
 
 def ctx_from(args: argparse.Namespace) -> Ctx:
@@ -115,9 +129,17 @@ def hoist_globals(argv: List[str], skip: set = frozenset()) -> List[str]:
 def main(argv: List[str] = None) -> int:
     enable_utf8()
     argv = list(sys.argv[1:] if argv is None else argv)
-    first = build_parser().parse_known_args(argv)      # which command? nothing else needed yet
+    command = build_parser().parse_known_args(argv)[0].command   # which command? nothing else yet
+    if not command:
+        # no command: the menu if there is someone there to pick from it, the help otherwise
+        probe = ctx_from(build_parser().parse_known_args(argv)[0])
+        if probe.interactive and not probe.json:
+            command, argv = "menu", argv + ["menu"]   # the same path as typing `rps menu`
+        else:
+            build_parser().print_help()
+            return 0
     try:
-        parser = build_parser(only=first[0].command)  # now its own flags
+        parser = build_parser(only=command)           # now its own flags
     except ImportError as e:
         print(f"{theme.bad('command unavailable')}: {e}", file=sys.stderr)
         return 127

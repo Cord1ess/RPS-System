@@ -6,4 +6,5 @@ COMMANDS = [
     ("setup", "the Setup tab: camera, ROI, lighting, latency test", "rps.cli.setup"),
     ("bot", "the Bot tab: the ESP32 link, Wi-Fi delay, servo moves", "rps.cli.bot"),
     ("play", "play against a human or another program", "rps.cli.play"),
+    ("menu", "interactive menu", "rps.cli.menu"),
 ]
