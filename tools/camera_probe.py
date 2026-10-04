@@ -22,6 +22,8 @@ import os
 import sys
 import time
 
+os.environ.setdefault("OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS", "0")   # opens the webcam ~3x faster (rps/__init__.py)
+
 import cv2
 import numpy as np
 
@@ -48,7 +50,7 @@ def open_mode(index, backend, width=640, height=480, fps=30, fourcc="YUY2"):
     return cap
 
 
-def measure(cap, seconds=2.5, warmup=1.0):
+def measure(cap, seconds=1.5, warmup=0.5):
     """Returns dict with mean fps, p90 interval, brightness and flicker ripple. Only new images count: a
     driver's repeat of the previous image (see rps.camera.is_repeat) is not a frame."""
     t_end = time.perf_counter() + warmup
@@ -91,7 +93,7 @@ def main():
     parser = argparse.ArgumentParser(description="Probe webcam modes, exposure locks and lighting")
     parser.add_argument("--config", default="config.json")
     parser.add_argument("--index", type=int, default=None)
-    parser.add_argument("--seconds", type=float, default=2.5)
+    parser.add_argument("--seconds", type=float, default=1.5)   # ~45 frames per mode at 30 fps
     parser.add_argument("--write-config", action="store_true")
     args = parser.parse_args()
     cfg = load_config(args.config)

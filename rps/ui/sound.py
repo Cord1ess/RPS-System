@@ -126,7 +126,7 @@ class BeatPlayer(QObject):
         super().__init__(parent)
         self.timer = QTimer(self)
         self.timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self.timer.setInterval(4)
+        self.timer.setSingleShot(True)             # woken for each beat, not polled (spares a Pi's CPU)
         self.timer.timeout.connect(self._tick)
         self._sets = {}                  # sound -> BeatSounds, or False without audio support
         self._sounds = None
@@ -148,7 +148,7 @@ class BeatPlayer(QObject):
         self._sounds = self._sets[sound]
         self.schedule, self.next_k, self.played = schedule, 0, 0
         self.set_volumes(beat_volume, cue_volume)
-        self.timer.start()
+        self._tick()
 
     def set_volumes(self, beat_volume: float, cue_volume: float):
         self.beat_volume, self.cue_volume = beat_volume, cue_volume
@@ -169,6 +169,12 @@ class BeatPlayer(QObject):
                 self._sounds.play(b.kind, self.cue_volume if b.kind in CUE_KINDS else self.beat_volume)
                 self.played += 1
             self.beat.emit(b)
-        if self.next_k >= s.total_beats and now >= s.end_time:
-            self.stop()
-            self.finished.emit()
+        if self.next_k >= s.total_beats:
+            if now >= s.end_time:
+                self.stop()
+                self.finished.emit()
+                return
+            due = s.end_time
+        else:
+            due = s.beat(self.next_k).t
+        self.timer.start(max(0, int((due - time.perf_counter()) * 1000)))

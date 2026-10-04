@@ -5,8 +5,8 @@ collapsible sections, and page headers. Every helper takes a tooltip so nothing 
 
 import os
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPalette
 from PySide6.QtWidgets import QFrame, QLabel, QPushButton, QToolButton, QVBoxLayout, QWidget
 
 BG, PANEL, RAISED, BORDER = "#16191d", "#1e2226", "#262b31", "#353c44"
@@ -126,6 +126,30 @@ def set_kind(b: QPushButton, kind: str):
     b.setObjectName(kind)
     b.style().unpolish(b)
     b.style().polish(b)
+
+
+class FitLabel(QLabel):
+    """One line of big text that shrinks its font to fit its width, instead of forcing the window wider
+    (e.g. the Play page's cue: "Press Start", "SCISSORS", "Waiting for camera")."""
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(40, super().minimumSizeHint().height())
+
+    def sizeHint(self) -> QSize:
+        hint = super().sizeHint()
+        return QSize(min(hint.width(), 420), hint.height())
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        font = self.font()
+        area = self.contentsRect()
+        size = font.pointSizeF()
+        while size > 8 and QFontMetrics(font).horizontalAdvance(self.text()) > area.width():
+            size -= 1
+            font.setPointSizeF(size)
+        p.setFont(font)
+        p.setPen(self.palette().color(self.foregroundRole()))
+        p.drawText(area, int(self.alignment()), self.text())
 
 
 class Card(QFrame):

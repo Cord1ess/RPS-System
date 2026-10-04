@@ -116,7 +116,7 @@ class VideoView(QLabel):
     """Aspect-correct image view. With roi_edit on, dragging selects a square play zone."""
     roi_selected = Signal(int, int, int)
 
-    def __init__(self, min_w: int = 480, min_h: int = 360, placeholder: str = "Camera off"):
+    def __init__(self, min_w: int = 320, min_h: int = 240, placeholder: str = "Camera off"):
         super().__init__()
         self.setMinimumSize(min_w, min_h)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)

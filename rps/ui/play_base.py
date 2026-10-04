@@ -346,6 +346,8 @@ class PlayBase(Tab):
                 self.log.log(f"Simulated robot could not start: {e}")
                 return
         self.link = RobotLink.from_config(cfg, host=host).start()
+        if cfg.mode == "real":
+            self.main.announce_robot(self.link.addr[0])  # another computer driving it hands over
 
     def _references(self, cnn):
         """Dextra's most confident sample image per gesture (computed in the loading thread)."""
@@ -418,6 +420,15 @@ class PlayBase(Tab):
         if hasattr(self, "series"):
             for s in self.series.values():
                 s.clear()
+
+    def on_robot_taken(self, computer: str):
+        """Another computer started driving this robot: stop, so the two never fight over the hand."""
+        if self.pipeline is not None and self.link is not None and self.mock is None:
+            self.stop_run(f"Stopped: {computer} took over the robot. Start again here to take it back.")
+            self.robot_taken_by(computer)
+
+    def robot_taken_by(self, computer: str):
+        pass
 
     # hooks for the pages
     def on_run_started(self):

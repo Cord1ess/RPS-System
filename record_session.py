@@ -23,6 +23,10 @@ Keys during recording: q = stop and keep, x = abort and delete.
 import argparse
 import time
 
+import os
+
+os.environ.setdefault("OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS", "0")   # opens the webcam ~3x faster (rps/__init__.py)
+
 import cv2
 
 from rps.camera import CameraSource, MockSource, crop_roi

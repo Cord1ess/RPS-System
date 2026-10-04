@@ -16,6 +16,10 @@ import argparse
 import sys
 import time
 
+import os
+
+os.environ.setdefault("OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS", "0")   # opens the webcam ~3x faster (rps/__init__.py)
+
 import cv2
 import numpy as np
 
@@ -25,6 +29,7 @@ from rps.hud import draw_banner, draw_card, draw_dvs_preview, draw_hand, draw_ro
 from rps.decision import GESTURE_NAME
 from rps.perf import boost_process
 from rps.game import ENDLESS_ROUNDS, BeatSchedule
+from rps.handoff import Handoff
 from rps.pipeline import RECOGNIZERS, Pipeline, load_models, reader_name
 from rps.robot_link import MockEsp, RobotLink
 from rps.timing import LatencyLog
@@ -86,6 +91,8 @@ def main():
         mock_esp = MockEsp(port=cfg.robot.port).start()
     if robot != "off":
         link = RobotLink.from_config(cfg.robot, host="127.0.0.1" if mock_esp else None).start()
+        if robot == "real" and cfg.robot.handoff:     # a copy of the app driving this robot hands over
+            Handoff(on_taken=lambda *_: None, listen=False).announce(link.addr[0])
 
     source = open_source(cfg.camera, cfg.roi, video=args.video, mock=args.mock_camera, realtime=True)
     pipeline = Pipeline(cfg, cnn, hand, pose_sink=link.send_pose if link else None)

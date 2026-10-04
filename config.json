@@ -1,6 +1,7 @@
 {
   "camera": {
     "index": 0,
+    "url": "",
     "backend": "msmf",
     "width": 640,
     "height": 480,
@@ -8,7 +9,7 @@
     "fourcc": "YUY2",
     "mirror": true,
     "lock_exposure": false,
-    "exposure": -5.0,
+    "exposure": -6.0,
     "lock_white_balance": false,
     "wb_temperature": 4500,
     "restore_auto_on_exit": true
@@ -59,8 +60,9 @@
     "majority_window": 5
   },
   "decision": {
-    "mode": "continuous",
+    "mode": "countdown",
     "recognizer": "dextra_tuned",
+    "robot_plays": "win",
     "active_events_per_frame": 100,
     "still_events_per_frame": 40,
     "still_frames": 2,
@@ -87,7 +89,7 @@
   "robot": {
     "mode": "real",
     "protocol": "rps_text",
-    "host": "10.15.12.20",
+    "host": "192.168.0.126",
     "port": 4210,
     "heartbeat_s": 0.1,
     "ack_timeout_s": 0.5,
@@ -109,6 +111,7 @@
   },
   "latency": {
     "camera_latency_ms": 50.0,
+    "network_ms": 0.0,
     "servo_transition_ms": {
       "N>R": 150.0,
       "N>P": 150.0,

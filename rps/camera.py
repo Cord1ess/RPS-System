@@ -119,6 +119,7 @@ class CameraSource:
         self.dropped_reads = 0
         self.repeats = 0                # driver repeats skipped (see is_repeat)
         self.backend = backend_name(cam.backend)
+        self._apply_pending = False     # exposure / colour balance changed: apply between two frames
 
     def open(self) -> "CameraSource":
         if self.cfg.url:
@@ -190,6 +191,28 @@ class CameraSource:
             cap.set(cv2.CAP_PROP_WB_TEMPERATURE, self.cfg.wb_temperature)
             self._locked = True
 
+    LIVE_KEYS = ("lock_exposure", "exposure", "lock_white_balance", "wb_temperature", "mirror")
+
+    def request_apply(self):
+        """Applies the exposure and colour balance settings to the running camera at the next frame (about
+        35-55 ms on the demo laptop's camera; no reopening). Mirroring already applies to every frame."""
+        self._apply_pending = True
+
+    def _apply_live(self):
+        cap = self.cap
+        if cap is None or self.backend == "ffmpeg":       # an IP camera: set in its own settings
+            return
+        if self.cfg.lock_exposure:
+            set_manual_exposure(cap, self.backend, self.cfg.exposure)
+        else:
+            set_auto_exposure(cap, self.backend)
+        if self.cfg.lock_white_balance:
+            cap.set(cv2.CAP_PROP_AUTO_WB, 0)
+            cap.set(cv2.CAP_PROP_WB_TEMPERATURE, self.cfg.wb_temperature)
+        else:
+            cap.set(cv2.CAP_PROP_AUTO_WB, 1)
+        self._locked = self.cfg.lock_exposure or self.cfg.lock_white_balance
+
     def restore_auto(self):
         """Returns the driver to automatic exposure/white balance so other apps look normal."""
         if self.cap is None or not getattr(self, "_locked", False):
@@ -209,6 +232,9 @@ class CameraSource:
         frame_id = 0
         prev, prev_t = None, None
         while self._running:
+            if self._apply_pending:                         # set by the UI; applied here, between reads
+                self._apply_pending = False
+                self._apply_live()
             ok, img = self.cap.read()
             t = time.perf_counter()
             if not ok or img is None:

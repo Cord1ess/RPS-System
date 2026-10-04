@@ -1,14 +1,18 @@
-"""Settings page: every config.json field with a readable name and explanation; advanced ones hidden by default."""
+"""
+Settings page: every config.json field with a readable name and explanation; advanced ones hidden by
+default. At the top, this computer's interface size (rps.ui.scale), which applies after a restart.
+"""
 
 from dataclasses import fields
 
-from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QMessageBox, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QComboBox, QHBoxLayout, QMessageBox, QScrollArea, QVBoxLayout, QWidget
 
 from rps.config import Config
+from rps.ui import scale
 from rps.ui.base import Tab
-from rps.ui.common import ConfigForm
+from rps.ui.common import ConfigForm, select_data
 from rps.ui.fields import SECTION_INFO
-from rps.ui.style import Card, button, page_header
+from rps.ui.style import Card, button, caption, label, page_header, tip
 
 ORDER = ["camera", "decision", "vote", "dvs", "cnn", "roi", "hand", "latency"]
 # Chosen on their own pages, so not repeated here: the robot and its move times (Bot tuning), the match
@@ -37,6 +41,25 @@ class SettingsTab(Tab):
         for b in (save, undo, reset):
             top.addWidget(b)
 
+        size_row = QHBoxLayout()
+        self.size = tip(QComboBox(), "How big the whole interface is on this computer: every font, button and panel. "
+                                     "Auto fits the window to the screen it opens on. Kept for this computer only "
+                                     "(the laptop and the Pi keep their own).")
+        for value, text in scale.CHOICES:
+            self.size.addItem(text, value)
+        select_data(self.size, self._saved_size())
+        self.size.currentIndexChanged.connect(self._size_changed)
+        self.restart_btn = button("Restart to apply", "primary", "Close and reopen the app at the new size (asks to "
+                                                                 "save changed settings first).")
+        self.restart_btn.clicked.connect(self._restart)
+        self.size_note = caption(f"Now: {scale.current() * 100:.0f}%")
+        size_row.addWidget(label("Interface size", self.size.toolTip()))
+        size_row.addWidget(self.size)
+        size_row.addWidget(self.restart_btn)
+        size_row.addWidget(self.size_note)
+        size_row.addStretch(1)
+        self.restart_btn.setVisible(False)
+
         self.cards = []
         names = {f.name for f in fields(Config)}
         for section in [s for s in ORDER if s in names]:
@@ -59,6 +82,7 @@ class SettingsTab(Tab):
         page = QVBoxLayout(self)
         page.addWidget(page_header("Settings", "Saved in config.json and used by the whole app. The robot is on "
                                                "Bot tuning; the match on Play. Hover any setting for what it does."))
+        page.addLayout(size_row)
         page.addLayout(top)
         page.addWidget(scroll, 1)
         self._layout_cards(False)
@@ -83,6 +107,24 @@ class SettingsTab(Tab):
             heights[i] += card.sizeHint().height()
         for col in self.columns:
             col.addStretch(1)
+
+    # ------------------------------------------------------------------ interface size
+    def _saved_size(self) -> str:
+        prefs = self.main.prefs
+        value = prefs.value(scale.PREF_KEY, "auto") if prefs is not None else getattr(self, "_size_value", "auto")
+        return str(value)
+
+    def _size_changed(self, _i):
+        value = self.size.currentData()
+        if self.main.prefs is not None:
+            self.main.prefs.setValue(scale.PREF_KEY, value)
+        self._size_value = value
+        self.restart_btn.setVisible(True)
+        self.size_note.setText(f"Now: {scale.current() * 100:.0f}%. Restart to apply.")
+
+    def _restart(self):
+        if not self.main.restart():
+            self.size_note.setText("Close and reopen the app to apply.")
 
     def _reset(self):
         if QMessageBox.question(self, "Reset settings", "Reset every setting to its default? (Nothing is saved until "

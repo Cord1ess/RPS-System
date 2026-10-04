@@ -19,6 +19,8 @@ import random
 import sys
 import time
 
+os.environ.setdefault("OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS", "0")   # opens the webcam ~3x faster (rps/__init__.py)
+
 import cv2
 import numpy as np
 

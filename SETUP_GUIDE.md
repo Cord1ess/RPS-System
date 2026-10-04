@@ -145,6 +145,16 @@ If your desktop session does not pick it up, add the same command followed by ` 
 - Put the Pi on the same Wi-Fi as the robot. For a venue with no usable Wi-Fi, the Pi can run its own hotspot with the name and password the robot's firmware joins: `sudo nmcli device wifi hotspot ssid NAME password PASSWORD` (or the network menu's hotspot option). The Pi is then `10.42.0.1` and the robot gets an address from it: find it with `ip neigh` and enter it on Bot tuning.
 - Choose the speaker in the desktop's volume menu (HDMI or the USB speaker).
 
+### 3.9 Switching the robot between the Pi and a laptop
+
+The robot's firmware takes commands from any computer on its network, so switching needs no change on the robot:
+
+1. **Same network.** The Pi, the laptop and the robot must be on one Wi-Fi: a router, or the Pi's hotspot (then the laptop joins the hotspot too).
+2. **Same robot address on both.** Give the robot a fixed address (a DHCP reservation on the router; on the Pi's hotspot it keeps its address) and enter it on Bot tuning on both computers.
+3. **Start where you want to play.** When one computer starts a game (or sends a command from Bot tuning), it tells the others on the network, and any game driving the same robot stops there, with "Robot in use by <computer>". Starting again on the first computer takes the robot back.
+
+This is the **Hand over to other computers** setting (`robot.handoff` in `config.json`, on by default). On Windows, the first time the app starts, Windows asks whether Python may use the network: tick **Private networks** and allow it, or the laptop cannot be told to hand over (it can still take over from the Pi). If the robot's Wi-Fi changes, it opens its setup network **ESP32-RPS-Setup** (WiFiManager) to pick the new one; its address may change, so check it on the router or the hotspot (`ip neigh` on the Pi).
+
 ## 4. Windows laptop setup
 
 ```powershell
@@ -178,11 +188,12 @@ Hover over any control, reading or column title for a short explanation. A **Sav
 
 | Control | What it does |
 |---|---|
-| Source | **Webcam**, **Simulated camera** (a moving test pattern) or **Recorded session** (replays a recording in real time) |
-| Start camera | Opens or closes the source |
+| Source | **Webcam**, **Simulated camera** (a moving test pattern) or **Recorded session** (replays a recording in real time). Changing it while the camera runs switches straight away |
+| Camera list / Find cameras | Which webcam (built-in or USB), by name; shown when there is more than one. Changing it switches the running camera. **Find cameras** lists them again after plugging one in |
+| Start camera | Opens or closes the source. Opening takes about 1.3 s on the demo laptop; closing happens in the background, so the window never freezes |
 | Frame rate / Light / Overexposed chips | New camera images per second (images the driver sends twice count once; 27+ is good), average brightness of the play zone (60–200 is good), share of pure-white pixels (under 5% is good). A hint below says what to fix |
-| Auto-configure | Measures every camera mode in the current light (~25 s) and saves the best: capture driver, exposure lock |
-| Manual camera settings | Every camera setting (section 13), then **Apply and restart camera** |
+| Auto-configure | Measures every camera mode in the current light (~10–15 s) and saves the best: capture driver, exposure lock |
+| Manual camera settings | Every camera setting (section 13). **Exposure, colour balance and mirroring apply to the running camera at once**; the others (camera number, IP address, driver, size, frame rate, format) restart it by themselves. **Apply and restart camera** restarts it by hand |
 | Set play zone | Click, then drag a square on the video: the only area analysed |
 | Camera delay tests | **Mirror test**: the screen flashes, the camera watches it in a mirror; measures how late camera images are (includes the screen's own delay). **LED test**: the robot flashes an LED (reference firmware only) |
 | Save setup | Saves the camera and play zone |
@@ -199,6 +210,7 @@ Hover over any control, reading or column title for a short explanation. A **Sav
 | Rock / Paper / Scissors | Send one command each (Ready too, on the reference firmware). The page keeps one connection while open, so every command comes from the same port; each click goes out at once and appears in the log with anything the robot sends back |
 | Finger tuning | One row per servo channel: **0 Pinky + Ring**, **1 Index**, **2 Middle + Point**. Slider or number: 0 = extended, 180 = folded; **Send** sends `ANGLE:<channel>,<angle>` and shows the robot's confirmation (`CONFIRM_ANGLE:...`). **Extend all (0°)**, **Fold all (180°)**; **Send as I move** sends when you let go of a slider. Use it to find each finger's straight and folded angles (then the hardware team puts them in the firmware) |
 | Move times | How long the hand takes between each pair of poses (ms). Measure with a 240 fps slow-motion video; the Speed card uses them |
+| Hand over (section 3.9) | Sending a command from here, or starting a game, takes the robot from another computer running the app; if another computer takes it, the page shows "Robot in use by <computer>" |
 | Measure Wi-Fi delay | Pings the robot 10 times (the ESP32 answers pings whatever its firmware); keeps half the typical round trip as the one-way delay for the Speed card. If it is slow or uneven, the ESP32 is probably power-saving its Wi-Fi: the firmware needs `WiFi.setSleep(false);` in `setup()` |
 
 ### 3 Record
@@ -237,6 +249,8 @@ Scoring: each round is scored from your throw and the robot's move; a round wher
 Everything the recognition and the game rules are doing, for tuning. Status: **Decision** (your gesture after the rules), **Read by** (which reader decided), **Robot** (the move sent), **Round**, **Tempo** (your learned pump speed). Camera, **Speed** card, delay graph. Right column: **Run** (**Recognition**; **Game**: Countdown, Beat guide or Live; **Robot plays**; **Start**; **Test Dextra Raw** runs Dextra Raw alone in Live mode; **Download Dextra**), **Last throws** (each throw's timing: waiting, computing, total), the **Dextra** card (raw answer, confidence per gesture, Dextra's own example images), the **Mediapipe** card, **Orientation and tuning** (turn/mirror the Dextra view, sensitivity, votes, pumps; applied immediately) and the **Log**.
 
 ### Settings
+
+**Interface size** (top): how big the whole interface is on this computer, every font, button and panel together. **Auto** (the default) fits the window to the screen it opens on; 60–150% sets it by hand. It is kept per computer (the laptop and the Pi keep their own), and **Restart to apply** reopens the app at the new size. For one run: `python app.py --scale 80`.
 
 Every other setting by section (the robot is on Bot tuning, the match on Play). **Show advanced settings** shows the fine-tuning ones. **Save** writes `config.json`; **Undo changes** reloads the last save; **Reset to defaults** (saved only when you press Save). Section 13 lists every setting.
 
@@ -281,7 +295,9 @@ The headline reads "Computed and sent in X ms · throw -> command Y ms". On the 
 
 The app runs these same scripts; you can also use them directly (on the Pi, prefix with `.venv/bin/`).
 
-**`python app.py`**: `--fullscreen` fill the screen · `--page NAME` open on a page (`play`, `play-debug`, `setup`, `bot`, ...) · `--mock` start with the simulated camera · `--config FILE` · `--data-root DIR` (where recordings live).
+**`python app.py`**: `--fullscreen` fill the screen · `--page NAME` open on a page (`play`, `play-debug`, `setup`, `bot`, ...) · `--scale 80` interface size for this run · `--mock` start with the simulated camera · `--config FILE` · `--data-root DIR` (where recordings live).
+
+**Keys in the app:** **F11** full screen on/off, **Esc** leaves full screen, **F5** starts or stops the match on Play and Play Debug.
 
 **`python play.py`** (the game without the app window: camera view with a readout; `q` quit, `m` switch game, `r` reset counts):
 
@@ -317,6 +333,9 @@ The app runs these same scripts; you can also use them directly (on the Pi, pref
 - [ ] Sound comes out of the right speaker (Play a round).
 - [ ] Settings saved; the app starts on Play in full screen at boot.
 - [ ] Robot firmware: `WiFi.setSleep(false)`, servos on their own power supply (a power dip resets the ESP32).
+- [ ] Recognition set to **Both** (on all 14 recordings: 99% of throws right, decided ~64 ms after the throw; Dextra Tuned alone: 91.5%, ~128 ms).
+- [ ] Laptop as backup: same Wi-Fi and robot address as the Pi; on Windows, Python allowed on private networks (section 3.9).
+- [ ] Interface size right on the showcase screen (Settings > Interface size).
 
 ## 12. Troubleshooting
 
@@ -333,6 +352,9 @@ The app runs these same scripts; you can also use them directly (on the Pi, pref
 | Wi-Fi delay slow or uneven | ESP32 Wi-Fi power saving: `WiFi.setSleep(false);` in the firmware's `setup()`; keep the robot close to the router |
 | No beat sound | Pick the right speaker in the system's volume menu; check the volumes on the Play page (Play a round) |
 | Everything slow on a laptop | Plug it in (battery mode slows the CPU) |
+| The window is too big or too small for the screen | Settings > Interface size (Auto fits the screen), then Restart to apply; or `python app.py --scale 80` |
+| A game stopped with "Robot in use by ..." | Another computer started driving the robot (section 3.9). Press Start here to take it back, or turn off Hand over to other computers |
+| The laptop does not stop when the Pi takes over | Windows Firewall blocks Python from receiving: allow Python on private networks, and check both use the same robot address |
 
 ## 13. Every setting
 
@@ -353,7 +375,7 @@ How the webcam is opened and exposed. Where to change it: Setup page (Manual cam
 | Pixel format *(advanced)* | `camera.fourcc` | YUY2 (uncompressed) (`YUY2`) | YUY2 is uncompressed, so compression noise is not mistaken for movement. Choices: `YUY2` = YUY2 (uncompressed); `MJPG` = MJPG (compressed). |
 | Mirror image *(advanced)* | `camera.mirror` | on | Show the camera like a mirror. |
 | Lock exposure | `camera.lock_exposure` | off | Fixed brightness and less blur. Needs a lamp on the play zone: this camera cannot boost a dark image. |
-| Exposure | `camera.exposure` | -5 | -5 = 31 ms, -6 = 16 ms, -7 = 8 ms per frame. Shorter = less blur, darker image. |
+| Exposure | `camera.exposure` | -6 | -5 = 31 ms, -6 = 16 ms, -7 = 8 ms per frame. Shorter = less blur, darker image. |
 | Lock colour balance *(advanced)* | `camera.lock_white_balance` | off | Stops colour shifts being read as movement. |
 | Colour balance (K) *(advanced)* | `camera.wb_temperature` | 4500 | Used when colour balance is locked. |
 | Restore camera on exit *(advanced)* | `camera.restore_auto_on_exit` | on | Hand the camera back to other apps with automatic exposure. |
@@ -434,7 +456,7 @@ Countdown, beat guide, pumps, throws and timing. Where to change it: Settings; r
 
 | Setting | Key | In the repo's config.json | What it does |
 |---|---|---|---|
-| Game | `decision.mode` | Live (answers continuously) (`continuous`) | Countdown: pump, then throw; pumps are counted from your hand. Beat guide: a drum beat leads each round and you throw on SHOOT. Live: the robot answers continuously. Choices: `countdown` = Countdown (pumps counted from your hand); `guided` = Beat guide (throw on SHOOT); `continuous` = Live (answers continuously). |
+| Game | `decision.mode` | Countdown (pumps counted from your hand) (`countdown`) | Countdown: pump, then throw; pumps are counted from your hand. Beat guide: a drum beat leads each round and you throw on SHOOT. Live: the robot answers continuously. Choices: `countdown` = Countdown (pumps counted from your hand); `guided` = Beat guide (throw on SHOOT); `continuous` = Live (answers continuously). |
 | Recognition | `decision.recognizer` | Dextra Tuned (`dextra_tuned`) | Dextra Raw, Dextra Tuned, Mediapipe, or Both (Dextra Tuned + Mediapipe). Choices: `dextra_raw` = Dextra Raw; `dextra_tuned` = Dextra Tuned; `mediapipe` = Mediapipe; `both` = Both (Dextra Tuned + Mediapipe). |
 | Robot plays | `decision.robot_plays` | To win (beats your throw) (`win`) | To win: the move that beats your throw. To draw: the same move. To lose: the move your throw beats. Choices: `win` = To win (beats your throw); `draw` = To draw (copies your throw); `lose` = To lose (plays what your throw beats). |
 | Moving above *(advanced)* | `decision.active_events_per_frame` | 100 | Movement per camera frame that counts as the hand moving. |
@@ -468,10 +490,11 @@ Connection to the robot (Bot tuning page). Where to change it: Bot tuning page.
 |---|---|---|---|
 | Robot | `robot.mode` | Real robot (`real`) | Real robot over Wi-Fi, a simulated robot on this computer, or off. Choices: `real` = Real robot; `simulated` = Simulated robot; `off` = Off. |
 | Robot commands | `robot.protocol` | Team firmware (RPS:ROCK, RPS:PAPER, RPS:SCISSORS) (`rps_text`) | Must match the robot's firmware. Team firmware: sends RPS:ROCK, RPS:PAPER or RPS:SCISSORS once when the robot's move changes; it has no ready position and does not reply. Reference firmware: numbered messages with replies. Choices: `rps_text` = Team firmware (RPS:ROCK, RPS:PAPER, RPS:SCISSORS); `ack` = Reference firmware (numbered, with replies). |
-| Robot address | `robot.host` | 10.15.12.20 | IP address of the ESP32 (team robot: 192.168.0.126; the reference firmware's own Wi-Fi: 192.168.4.1). |
+| Robot address | `robot.host` | 192.168.0.126 | IP address of the ESP32 (team robot: 192.168.0.126; the reference firmware's own Wi-Fi: 192.168.4.1). |
 | Robot port | `robot.port` | 4210 | UDP port. Must match the firmware (4210). |
 | Resend every (s) *(advanced)* | `robot.heartbeat_s` | 0.1 | Reference firmware only: the current move is resent this often. |
 | Reply timeout (s) *(advanced)* | `robot.ack_timeout_s` | 0.5 | Reference firmware only: replies later than this are left out of the robot reply time. |
+| Hand over to other computers | `robot.handoff` | on | When another computer running this app (e.g. the Pi or a laptop) starts driving the same robot, stop here so the two never fight over the hand. |
 | Finger angles *(advanced)* | `robot.finger_angles` | [0, 0, 0] | Team firmware: the last angle sent to each servo channel on Bot tuning (0 = extended, 180 = folded). |
 
 ### Match (`game`)

@@ -143,6 +143,9 @@ FIELD_INFO = {
                                "often.", True),
     ("robot", "ack_timeout_s"): ("Reply timeout (s)", "Reference firmware only: replies later than this are left "
                                  "out of the robot reply time.", True),
+    ("robot", "handoff"): ("Hand over to other computers", "When another computer running this app (e.g. the Pi "
+                                                          "or a laptop) starts driving the same robot, stop here "
+                                                          "so the two never fight over the hand.", False),
     ("robot", "finger_angles"): ("Finger angles", "Team firmware: the last angle sent to each servo channel on "
                                  "Bot tuning (0 = extended, 180 = folded).", True),
     # game (Play page)

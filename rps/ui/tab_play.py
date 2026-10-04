@@ -8,6 +8,8 @@ The robot connection is set on the Bot tuning page.
 
 import os
 
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import QComboBox, QFrame, QGridLayout, QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
 
 from rps.cnn import list_models
@@ -186,6 +188,9 @@ class PlayTab(PlayBase):
         page.addWidget(page_header("Play Debug", "Every reading and rule, for tuning. Press Start and play inside "
                                                  "the green square."))
         page.addLayout(body, 1)
+        # F5 starts or stops (handy when presenting)
+        QShortcut(QKeySequence(Qt.Key.Key_F5), self, activated=self._toggle,
+                  context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self._reset_display()
 
     # ------------------------------------------------------------------ choices

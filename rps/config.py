@@ -128,6 +128,7 @@ class RobotConfig:
     port: int = 4210
     heartbeat_s: float = 0.10       # "ack" only: resend period (its firmware falls back to READY after 2 s)
     ack_timeout_s: float = 0.5      # "ack" only
+    handoff: bool = True            # stop here when another computer running this app takes the same robot
     # Finger tuning (team firmware's ANGLE:<channel>,<angle>): the last angle sent per servo channel,
     # 0 = extended ... 180 = folded. Channels: 0 pinky + ring, 1 index, 2 middle + point.
     finger_angles: List[int] = field(default_factory=lambda: [0, 0, 0])

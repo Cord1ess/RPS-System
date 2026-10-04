@@ -1,9 +1,17 @@
-"""Setup page: camera, light and play zone. Manual settings and tools are folded away."""
+"""
+Setup page: camera, light and play zone. Manual settings and tools are folded away.
+
+The camera reacts at once: choosing another webcam or source restarts it in the background (the
+window never waits for the old one to close), exposure and colour balance apply to the running camera
+without reopening it, and other camera settings restart it by themselves.
+"""
 
 import re
+import sys
 
 import cv2
 import numpy as np
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QComboBox, QFileDialog, QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
 
 from rps.camera import crop_roi, margin_box
@@ -13,6 +21,23 @@ from rps.ui.style import Card, Chip, Collapsible, button, caption, page_header, 
 
 SOURCES = [("camera", "Webcam"), ("mock", "Simulated camera"), ("video", "Recorded session")]
 LATENCY_RESULT = re.compile(r"^\[latency\] \w+: median ([\d.]+) ms")
+RESTART_KEYS = ("index", "url", "backend", "width", "height", "fps", "fourcc")   # need the camera reopened
+
+
+def list_webcams():
+    """(camera number, name) for every webcam the system reports. On Linux the number comes from the
+    device path (/dev/videoN); on Windows it is the position, which is how OpenCV numbers them."""
+    try:
+        from PySide6.QtMultimedia import QMediaDevices
+        devices = QMediaDevices.videoInputs()
+    except Exception:                      # no multimedia support: the camera number setting still works
+        return []
+    out = []
+    for i, d in enumerate(devices):
+        dev_id = bytes(d.id()).decode(errors="replace")
+        m = re.search(r"/dev/video(\d+)", dev_id)
+        out.append((int(m.group(1)) if m and sys.platform != "win32" else i, d.description() or f"Camera {i}"))
+    return out
 
 
 class SetupTab(Tab):
@@ -44,6 +69,18 @@ class SetupTab(Tab):
         r.addWidget(self.source, 1)
         r.addWidget(self.cam_btn)
         cam.body.addLayout(r)
+        self.source.currentIndexChanged.connect(self._source_changed)
+        self.device = tip(QComboBox(), "Which webcam (built-in or USB). Changing it switches the running camera.")
+        self.device.currentIndexChanged.connect(self._device_changed)
+        refresh = button("Find cameras", tooltip="List the webcams again (after plugging one in).")
+        refresh.clicked.connect(lambda: self._fill_devices(force=True))
+        cam.body.addLayout(row(self.device, refresh))
+        self.device.setVisible(False)                 # shown once listed, if there is a choice
+        self._devices_listed = False
+        self._restart_timer = QTimer(self)
+        self._restart_timer.setSingleShot(True)
+        self._restart_timer.setInterval(700)            # one restart after a burst of edits
+        self._restart_timer.timeout.connect(self._reopen)
         self.chip_fps = Chip("Frame rate -", "off", "New images per second. 27 or more is good; this camera's "
                                                      "maximum is 30. Images the camera sends twice count once.")
         self.chip_light = Chip("Light -", "off", "Average brightness inside the play zone (0-255). 60-200 is good.")
@@ -51,14 +88,18 @@ class SetupTab(Tab):
         cam.body.addLayout(row(self.chip_fps, self.chip_light, self.chip_clip))
         self.light_hint = caption("")
         cam.body.addWidget(self.light_hint)
-        probe = button("Auto-configure", tooltip="Measures every camera mode in the current light (about 25 s) "
+        probe = button("Auto-configure", tooltip="Measures every camera mode in the current light (about 10-15 s) "
                                                  "and saves the best one. Run it again when the lighting changes.")
         probe.clicked.connect(self._probe)
         cam.body.addLayout(row(probe))
         manual = QWidget()
         ml = QVBoxLayout(manual)
         ml.setContentsMargins(0, 0, 0, 0)
-        ml.addWidget(ConfigForm(self.state, "camera"))
+        self.cam_form = ConfigForm(self.state, "camera")
+        self.cam_form.changed.connect(self._camera_setting_changed)
+        ml.addWidget(self.cam_form)
+        ml.addWidget(caption("Exposure, colour balance and mirroring apply to the running camera at once; other "
+                             "settings restart it by themselves."))
         reopen = button("Apply and restart camera", tooltip="Restart the camera with the values above.")
         reopen.clicked.connect(self._reopen)
         ml.addLayout(row(reopen))
@@ -173,9 +214,61 @@ class SetupTab(Tab):
             self.light_hint.setText("The camera could not be opened. Close other apps using it (OBS, Teams, "
                                     "browser) and check Windows camera privacy settings.")
 
+    def on_activated(self):
+        if not self._devices_listed:
+            QTimer.singleShot(0, self._fill_devices)       # listing takes ~1 s the first time: after showing
+
+    def _fill_devices(self, force: bool = False):
+        self._devices_listed = True
+        cams = list_webcams()
+        self.device.blockSignals(True)
+        self.device.clear()
+        for index, name in cams:
+            self.device.addItem(f"{name} (camera {index})", index)
+        current = self.state.cfg.camera.index
+        if self.device.findData(current) < 0:
+            self.device.addItem(f"Camera {current}", current)
+        self.device.setCurrentIndex(self.device.findData(current))
+        self.device.blockSignals(False)
+        self.device.setVisible(self.device.count() > 1 or force)
+
+    def _device_changed(self, _i):
+        index = self.device.currentData()
+        cfg = self.state.cfg.camera
+        if index is None or index == cfg.index:
+            return
+        cfg.index = int(index)
+        self.state.mark_dirty()
+        self.cam_form.refresh()
+        if self.main.worker.isRunning() and self.main.worker.kind == "camera":
+            self.main.restart_camera("camera")
+
+    def _source_changed(self, _i):
+        """A running camera switches to the newly chosen source straight away."""
+        if not self.main.worker.isRunning() or self.main.worker.stopping:
+            return
+        kind = self.source.currentData()
+        if kind == self.main.worker.kind and kind != "video":
+            return
+        video = None
+        if kind == "video":
+            video = QFileDialog.getExistingDirectory(self, "Choose a recording folder", self.state.recordings_root)
+            if not video:
+                return
+        self.main.restart_camera(kind, video)
+
+    def _camera_setting_changed(self, _section: str, key: str):
+        worker = self.main.worker
+        if not worker.isRunning() or worker.kind != "camera":
+            return
+        if key in RESTART_KEYS:
+            self._restart_timer.start()
+        else:
+            worker.apply_camera_settings()
+
     def _toggle_camera(self):
         if self.main.worker.isRunning():
-            self.main.stop_camera()
+            self.main.stop_camera(wait=False)              # released in the background
             return
         kind, video = self.source.currentData(), None
         if kind == "video":
@@ -186,9 +279,7 @@ class SetupTab(Tab):
 
     def _reopen(self):
         if self.main.worker.isRunning():
-            kind, video = self.main.worker.kind, self.main.worker.video_path
-            self.main.stop_camera()
-            self.main.start_camera(kind, video)
+            self.main.restart_camera(self.main.worker.kind, self.main.worker.video_path)
 
     def _roi_mode(self, on: bool):
         self.view.roi_edit = on

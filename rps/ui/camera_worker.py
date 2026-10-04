@@ -109,6 +109,22 @@ class CameraWorker(QThread):
             self.source = None
             self.state_changed.emit("stopped")
 
+    @property
+    def stopping(self) -> bool:
+        return self.isRunning() and self._stop
+
+    def request_stop(self):
+        """Asks the thread to stop and returns at once: releasing a webcam takes ~0.5 s, which would
+        freeze the window. state_changed("stopped") and finished follow."""
+        self._stop = True
+
     def stop(self):
+        """Stops and waits (for when the camera must be free right away, e.g. before a camera tool)."""
         self._stop = True
         self.wait(4000)
+
+    def apply_camera_settings(self):
+        """Exposure and colour balance changed: the running webcam takes them without reopening."""
+        src = self.source
+        if src is not None and hasattr(src, "request_apply"):
+            src.request_apply()

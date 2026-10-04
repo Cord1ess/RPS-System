@@ -279,6 +279,12 @@ class BotTab(Tab):
         if saved and self.wifi_chip.text() == "Not measured":
             self.wifi_chip.set(f"Last measured: {saved:.1f} ms one way", "ok")
 
+    def on_robot_taken(self, computer: str):
+        if self._link is not None and self._mock is None:
+            self._close_link()
+            self.chip.set(f"Robot in use by {computer}", "warn")
+            self.hint.setText(f"{computer} started driving the robot. Any command from here takes it back.")
+
     def on_deactivated(self):
         self._close_link()               # the Play pages open their own connection (and simulated robot)
 
@@ -329,6 +335,8 @@ class BotTab(Tab):
                 host = "127.0.0.1"
             self._link = RobotLink.from_config(cfg, host=host, on_text=self._emit_robot_said).start()
             self._link_key = self._key()
+            if cfg.mode == "real":
+                self.main.announce_robot(self._link.addr[0])   # testing from here takes the robot
         return self._link
 
     def _emit_robot_said(self, text: str):

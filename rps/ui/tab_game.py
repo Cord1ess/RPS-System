@@ -14,8 +14,9 @@ time goes to you. The Speed card shows how fast each throw was read and sent (rp
 import time
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout,
-                               QLabel, QRadioButton, QScrollArea, QSlider, QSpinBox, QVBoxLayout, QWidget)
+                               QRadioButton, QScrollArea, QSlider, QSpinBox, QVBoxLayout, QWidget)
 
 from rps.decision import DRAW, GESTURE_NAME, ROBOT, ROBOT_POSE, YOU, outcome
 from rps.game import ENDLESS_ROUNDS, BeatSchedule
@@ -24,8 +25,8 @@ from rps.ui.common import VideoView, select_data
 from rps.ui.fields import CHOICES
 from rps.ui.play_base import POSE_GESTURE, Metric, PlayBase, recognizer_combo, refresh_recognizers
 from rps.ui.sound import SOUNDS, BeatPlayer
-from rps.ui.style import (GESTURE_COLOR, MUTED, OK, WARN, Card, Collapsible, button, caption, label, page_header,
-                          set_kind, tip)
+from rps.ui.style import (GESTURE_COLOR, MUTED, OK, WARN, Card, Collapsible, FitLabel, button, caption, label,
+                          page_header, set_kind, tip)
 
 CUE_STYLE = "font-size:40pt; font-weight:800; color:{};"
 
@@ -73,7 +74,7 @@ class GameTab(PlayBase):
         for m in (self.m_robot_score, self.m_you_score, self.m_draws, self.m_round):
             bl.addWidget(m)
         bl.addStretch(1)
-        self.cue = QLabel("Press Start")
+        self.cue = FitLabel("Press Start")
         self.cue.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.cue.setStyleSheet(CUE_STYLE.format("#e4e7eb"))
         tip(self.cue, "What to do now. With the beat guide: pump on 3, 2, 1 and throw on SHOOT.")
@@ -216,6 +217,9 @@ class GameTab(PlayBase):
         page = QVBoxLayout(self)
         page.addWidget(page_header("Play", "A match against the robot. Play inside the green square."))
         page.addLayout(body, 1)
+        # F5 starts or stops (handy when presenting)
+        QShortcut(QKeySequence(Qt.Key.Key_F5), self, activated=self._toggle,
+                  context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self._loading_options = False
         self._show_score()
 
@@ -375,6 +379,10 @@ class GameTab(PlayBase):
         done = bool(self.results) and len(self.results) >= (self.rounds() or 1)     # endless: stopped after a round
         self._set_cue(self._final_text() if done else "Press Start", OK if done else "#e4e7eb")
         self.show_readers(self.recognizer_key())
+
+    def robot_taken_by(self, computer: str):
+        self._set_cue(f"Robot in use by {computer}", WARN)
+        self.result_line.setText(f"{computer} took over the robot. Press Start match to take it back.")
 
     def _final_text(self) -> str:
         robot, you, _draws = self._score()
