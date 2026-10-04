@@ -94,7 +94,7 @@ def parse_message(data: bytes) -> Optional[Dict]:
 
 class RobotLink:
     def __init__(self, host: str, port: int = 4210, heartbeat_s: float = 0.1, ack_timeout_s: float = 0.5,
-                 protocol: str = "ack", on_text: Optional[Callable[[str], None]] = None):
+                 protocol: str = "ack", on_text: Optional[Callable[[str], None]] = None, quiet: bool = False):
         if protocol not in PROTOCOLS:
             raise ValueError(f"Unknown robot protocol '{protocol}'")
         try:
@@ -103,6 +103,7 @@ class RobotLink:
             pass
         self.addr = (host, port)
         self.protocol = protocol
+        self.quiet = quiet                        # the command line reports the link itself, in pink
         self.replies = protocol == "ack"           # the team firmware ("rps_text") never answers
         self.heartbeat_s = heartbeat_s
         self.ack_timeout_s = ack_timeout_s
@@ -128,10 +129,10 @@ class RobotLink:
 
     @classmethod
     def from_config(cls, robot_cfg, host: Optional[str] = None,
-                    on_text: Optional[Callable[[str], None]] = None) -> "RobotLink":
+                    on_text: Optional[Callable[[str], None]] = None, quiet: bool = False) -> "RobotLink":
         """The link described by config.robot; `host` overrides the address (e.g. a simulated robot)."""
         return cls(host or robot_cfg.host, robot_cfg.port, robot_cfg.heartbeat_s, robot_cfg.ack_timeout_s,
-                   robot_cfg.protocol, on_text)
+                   robot_cfg.protocol, on_text, quiet)
 
     def start(self) -> "RobotLink":
         self._running = True
@@ -139,7 +140,8 @@ class RobotLink:
         self._thread.start()
         how = (f"heartbeat {self.heartbeat_s * 1000:.0f} ms" if self.protocol == "ack"
                else "RPS:<GESTURE> commands, sent on change, no replies")
-        print(f"[robot_link] Sending to {self.addr[0]}:{self.addr[1]} ({how})")
+        if not self.quiet:
+            print(f"[robot_link] Sending to {self.addr[0]}:{self.addr[1]} ({how})")
         return self
 
     def _now_ms(self) -> int:
@@ -263,7 +265,8 @@ class RobotLink:
         if self._thread is not None:
             self._thread.join(timeout=0.5)
         self.sock.close()
-        print(f"[robot_link] Closed. {self.stats()}")
+        if not self.quiet:
+            print(f"[robot_link] Closed. {self.stats()}")
 
 
 class MockEsp:

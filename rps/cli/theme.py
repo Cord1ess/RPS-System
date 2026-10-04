@@ -129,6 +129,7 @@ class Theme:
     """Everything printed by the CLI goes through one of these."""
 
     def __init__(self, color: Optional[bool] = None, stream=None):
+        self.silent = False                    # --json: the machine reads stdout, not a screen
         self.configure(color, stream)
 
     def configure(self, color: Optional[bool] = None, stream=None) -> "Theme":
@@ -160,7 +161,8 @@ class Theme:
         return f"{sgr}{text}\x1b[0m" if not bold else f"\x1b[1m{sgr}{text}\x1b[0m"
 
     def out(self, text: str = "") -> None:
-        print(text)
+        if not self.silent:
+            print(text)
 
     def title(self, text: str) -> None:
         """The app's name, once, at the top of a run."""

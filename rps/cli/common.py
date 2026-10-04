@@ -24,6 +24,16 @@ class Ctx:
     set_values: List[str] = field(default_factory=list)
     quiet: bool = False
 
+    @property
+    def interactive(self) -> bool:
+        """Whether it is worth asking a question: someone is there, and nobody is parsing."""
+        if self.json:
+            return False
+        try:
+            return bool(sys.stdin.isatty())
+        except Exception:
+            return False
+
     def load(self):
         """The settings, with --set applied."""
         from rps.config import load_config
