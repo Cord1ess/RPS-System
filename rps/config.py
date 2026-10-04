@@ -260,7 +260,8 @@ def load_config(path: str = DEFAULT_CONFIG_PATH, set_args: List[str] = None) -> 
     return cfg
 
 
-def save_config(cfg: Config, path: str = DEFAULT_CONFIG_PATH):
+def save_config(cfg: Config, path: str = DEFAULT_CONFIG_PATH, quiet: bool = False):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg.to_dict(), f, indent=2)
-    print(f"[config] Saved configuration to {os.path.abspath(path)}")
+    if not quiet:
+        print(f"[config] Saved configuration to {os.path.abspath(path)}")

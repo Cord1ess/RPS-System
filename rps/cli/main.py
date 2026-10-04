@@ -26,6 +26,25 @@ def version() -> str:
         return "3.3.0 + cli"
 
 
+def add_global_flags(parser: argparse.ArgumentParser, suppress: bool = False) -> argparse.ArgumentParser:
+    """The flags that apply to every command. They are added to each command as well, so both
+    `rps --json config` and `rps config --json` work; there the defaults are suppressed, so saying
+    nothing keeps whatever was said before the command name."""
+    def d(default):
+        return {"default": argparse.SUPPRESS} if suppress else {"default": default}
+
+    parser.add_argument("--config", metavar="PATH", help="settings file to read and write (default: config.json)", **d("config.json"))
+    parser.add_argument("--data-root", metavar="PATH",
+                        help="where recordings, models and logs live (default: next to the settings file)", **d(None))
+    parser.add_argument("--set", action="append", metavar="SECTION.KEY=VALUE",
+                        help="change a setting for this run only, e.g. --set decision.recognizer=mediapipe", **d([]))
+    parser.add_argument("--json", action="store_true", help="print one JSON object instead of a screen of text", **d(False))
+    parser.add_argument("--no-color", action="store_true", help="no colour anywhere (same as NO_COLOR=1)", **d(False))
+    parser.add_argument("-q", "--quiet", action="store_true", help="only answers, no explanations", **d(False))
+    parser.add_argument("-v", "--verbose", action="store_true", help="show the traceback when something breaks", **d(False))
+    return parser
+
+
 def build_parser(only: str = None) -> argparse.ArgumentParser:
     """The whole parser. With `only`, just that command's module is imported and its flags added,
     so `--help` never has to import the commands it is only listing."""
@@ -38,21 +57,13 @@ def build_parser(only: str = None) -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"rps {version()}")
-    parser.add_argument("--config", default="config.json", metavar="PATH",
-                        help="settings file to read and write (default: config.json)")
-    parser.add_argument("--data-root", default=None, metavar="PATH",
-                        help="where recordings, models and logs live (default: next to the settings file)")
-    parser.add_argument("--set", action="append", default=[], metavar="SECTION.KEY=VALUE",
-                        help="change a setting for this run only, e.g. --set decision.recognizer=mediapipe")
-    parser.add_argument("--json", action="store_true", help="print one JSON object instead of a screen of text")
-    parser.add_argument("--no-color", action="store_true", help="no colour anywhere (same as NO_COLOR=1)")
-    parser.add_argument("-q", "--quiet", action="store_true", help="only answers, no explanations")
-    parser.add_argument("-v", "--verbose", action="store_true", help="show the traceback when something breaks")
+    add_global_flags(parser)
 
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND", title="commands")
     for name, description, module_name in COMMANDS:
         sub = subparsers.add_parser(name, help=description, description=description,
                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+        add_global_flags(sub, suppress=True)
         if only is not None and only == name:
             module = importlib.import_module(module_name)
             sub.set_defaults(func=getattr(module, "run"))
@@ -69,9 +80,32 @@ def ctx_from(args: argparse.Namespace) -> Ctx:
                json=args.json, set_values=list(args.set), quiet=args.quiet)
 
 
+GLOBAL_FLAGS_WITH_VALUE = ("--config", "--data-root", "--set")
+GLOBAL_FLAGS = ("--json", "--no-color", "-q", "--quiet", "-v", "--verbose")
+
+
+def hoist_globals(argv: List[str]) -> List[str]:
+    """argparse wants the global flags before the command name, but people type them wherever they
+    think of them (`rps play --json`, `rps config get x --config pi.json`). Move them to the front."""
+    flags, rest = [], []
+    i = 0
+    while i < len(argv):
+        item = argv[i]
+        if item in GLOBAL_FLAGS_WITH_VALUE and i + 1 < len(argv):
+            flags += argv[i:i + 2]
+            i += 2
+        elif item.startswith(tuple(f"{f}=" for f in GLOBAL_FLAGS_WITH_VALUE)) or item in GLOBAL_FLAGS:
+            flags.append(item)
+            i += 1
+        else:
+            rest.append(item)
+            i += 1
+    return flags + rest
+
+
 def main(argv: List[str] = None) -> int:
     enable_utf8()
-    argv = list(sys.argv[1:] if argv is None else argv)
+    argv = hoist_globals(list(sys.argv[1:] if argv is None else argv))
     first = build_parser().parse_known_args(argv)      # which command? nothing else needed yet
     try:
         parser = build_parser(only=first[0].command)  # now its own flags

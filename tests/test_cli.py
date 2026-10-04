@@ -1,6 +1,7 @@
 """The command line itself: the parser, the pink theme, and that colour disappears when it should."""
 
 import io
+import json
 import os
 import subprocess
 import sys
@@ -141,3 +142,89 @@ def test_the_data_root_is_where_recordings_and_models_go(tmp_path):
     path = ctx.data_dir("recordings", "alice")
     assert path == tmp_path / "elsewhere" / "recordings" / "alice" and path.parent.exists()
     assert Ctx(config=tmp_path / "config.json").data_dir("logs") == tmp_path / "data" / "logs"
+
+
+def rps(*argv, config=None):
+    return main([*argv, "--config", str(config)] if config else list(argv))
+
+
+def test_config_get_prints_one_bare_value(tmp_path, capsys):
+    config = tmp_path / "config.json"
+    assert rps("config", "set", "robot.host=192.168.4.1", config=config) == 0
+    capsys.readouterr()
+    assert rps("config", "get", "robot.host", config=config) == 0
+    assert capsys.readouterr().out.strip() == "192.168.4.1"
+
+
+def test_config_set_writes_the_file_and_unset_puts_it_back(tmp_path, capsys):
+    config = tmp_path / "config.json"
+    rps("config", "set", "decision.mode=guided", "game.sound=wood", config=config)
+    saved = json.loads(config.read_text())
+    assert saved["decision"]["mode"] == "guided" and saved["game"]["sound"] == "wood"
+    capsys.readouterr()
+    rps("config", "unset", "decision.mode", "game.sound", config=config)
+    saved = json.loads(config.read_text())
+    assert saved["decision"]["mode"] == "countdown" and saved["game"]["sound"] == "drum"
+
+
+def test_config_set_refuses_a_nonsense_value_instead_of_saving_it(tmp_path, capsys):
+    config = tmp_path / "config.json"
+    with pytest.raises(SystemExit) as stopped:
+        rps("config", "set", "decision.mode=interpretive-dance", config=config)
+    assert not config.exists()
+    assert "allowed" in capsys.readouterr().err
+    assert stopped.value.code == 1
+
+
+def test_config_get_suggests_the_setting_you_meant(tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        rps("config", "get", "robot.mod", config=tmp_path / "config.json")
+    assert "Did you mean: mode?" in capsys.readouterr().err
+
+
+def test_config_show_marks_what_is_not_the_default(tmp_path, capsys):
+    config = tmp_path / "config.json"
+    rps("config", "set", "robot.host=10.0.0.9", config=config)
+    capsys.readouterr()
+    assert rps("config", "--section", "robot", config=config) == 0
+    rows = capsys.readouterr().out.splitlines()
+    changed = next(line for line in rows if "10.0.0.9" in line)
+    untouched = next(line for line in rows if "rps_text" in line)
+    assert changed.rstrip().endswith("*")                 # this one is not the default
+    assert untouched.rstrip().endswith("rps_text")        # this one is
+    assert "not the default" in rows[-1]
+
+
+def test_config_show_json_is_one_object_per_section(tmp_path, capsys):
+    config = tmp_path / "config.json"
+    capsys.readouterr()
+    assert rps("config", "--section", "game", "--json", config=config) == 0
+    assert json.loads(capsys.readouterr().out)["game"]["rounds"] == 5
+
+
+def test_global_flags_work_before_and_after_the_command_name(tmp_path, capsys):
+    config = tmp_path / "config.json"
+    capsys.readouterr()
+    assert main(["--json", "config", "--section", "game", "--config", str(config)]) == 0
+    first = capsys.readouterr().out
+    assert main(["config", "--json", "--section", "game", "--config", str(config)]) == 0
+    assert capsys.readouterr().out == first and json.loads(first)
+
+
+def test_a_global_flag_typed_after_the_command_is_moved_where_argparse_can_see_it():
+    from rps.cli.main import hoist_globals
+
+    assert hoist_globals(["play", "--json", "--config", "pi.json"]) == ["--json", "--config", "pi.json", "play"]
+    assert hoist_globals(["config", "get", "robot.host", "--set", "a=1", "-q"]) == \
+        ["--set", "a=1", "-q", "config", "get", "robot.host"]
+    assert hoist_globals(["config", "--config=pi.json"]) == ["--config=pi.json", "config"]
+    assert hoist_globals(["play", "--headless", "300"]) == ["play", "--headless", "300"]  # not ours: untouched
+
+
+def test_a_set_flag_after_the_command_still_only_affects_this_run(tmp_path, capsys):
+    config = tmp_path / "config.json"
+    rps("config", "set", "decision.mode=countdown", config=config)
+    capsys.readouterr()
+    assert rps("config", "get", "decision.mode", "--set", "decision.mode=guided", config=config) == 0
+    assert capsys.readouterr().out.strip() == "guided"
+    assert json.loads(config.read_text())["decision"]["mode"] == "countdown"
