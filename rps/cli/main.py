@@ -57,25 +57,32 @@ def build_parser(only: str = None) -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"rps {version()}")
-    add_global_flags(parser)
+    add_global_flags(parser, suppress=False)  # top level
+    parser.own_flags = {f for a in parser._actions for f in a.option_strings}
 
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND", title="commands")
+    parser.own_flags = set()
     for name, description, module_name in COMMANDS:
         sub = subparsers.add_parser(name, help=description, description=description,
                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
         add_global_flags(sub, suppress=True)
-        if only is not None and only == name:
+        if only is None or only == name:
             module = importlib.import_module(module_name)
             sub.set_defaults(func=getattr(module, "run"))
+            inherited = {id(action) for action in sub._actions}
             register = getattr(module, "register", None)
             if register is not None:
                 register(sub)
+            if only == name:
+                parser.own_flags = {opt for action in sub._actions if id(action) not in inherited
+                                    for opt in action.option_strings}
     return parser
 
 
 def ctx_from(args: argparse.Namespace) -> Ctx:
     if args.no_color or args.json:
         theme.configure(color=False)
+    theme.silent = args.json                      # --json: stdout carries the object and nothing else
     return Ctx(config=Path(args.config), data_root=Path(args.data_root) if args.data_root else None,
                json=args.json, set_values=list(args.set), quiet=args.quiet)
 
@@ -84,17 +91,19 @@ GLOBAL_FLAGS_WITH_VALUE = ("--config", "--data-root", "--set")
 GLOBAL_FLAGS = ("--json", "--no-color", "-q", "--quiet", "-v", "--verbose")
 
 
-def hoist_globals(argv: List[str]) -> List[str]:
+def hoist_globals(argv: List[str], skip: set = frozenset()) -> List[str]:
     """argparse wants the global flags before the command name, but people type them wherever they
-    think of them (`rps play --json`, `rps config get x --config pi.json`). Move them to the front."""
+    think of them (`rps play --json`, `rps config get x --config pi.json`). Move them to the front,
+    except any the command has a flag of its own with the same name (`rps setup zone --set ...`)."""
     flags, rest = [], []
     i = 0
     while i < len(argv):
         item = argv[i]
-        if item in GLOBAL_FLAGS_WITH_VALUE and i + 1 < len(argv):
+        if item in GLOBAL_FLAGS_WITH_VALUE and i + 1 < len(argv) and item not in skip:
             flags += argv[i:i + 2]
             i += 2
-        elif item.startswith(tuple(f"{f}=" for f in GLOBAL_FLAGS_WITH_VALUE)) or item in GLOBAL_FLAGS:
+        elif (item.startswith(tuple(f"{f}=" for f in GLOBAL_FLAGS_WITH_VALUE)) and item not in skip) \
+                or (item in GLOBAL_FLAGS and item not in skip):
             flags.append(item)
             i += 1
         else:
@@ -105,14 +114,14 @@ def hoist_globals(argv: List[str]) -> List[str]:
 
 def main(argv: List[str] = None) -> int:
     enable_utf8()
-    argv = hoist_globals(list(sys.argv[1:] if argv is None else argv))
+    argv = list(sys.argv[1:] if argv is None else argv)
     first = build_parser().parse_known_args(argv)      # which command? nothing else needed yet
     try:
         parser = build_parser(only=first[0].command)  # now its own flags
     except ImportError as e:
         print(f"{theme.bad('command unavailable')}: {e}", file=sys.stderr)
         return 127
-    args = parser.parse_args(argv)
+    args = parser.parse_args(hoist_globals(argv, parser.own_flags))
     if not getattr(args, "func", None):
         parser.print_help()
         return 0
