@@ -1,97 +1,16 @@
 """
-Beat guide sounds. They are made here and written to temporary WAV files, so nothing is shipped.
-Every sound has most of its loudness above 250 Hz, where laptop speakers play (a pure bass drum
-would be silent on them). Three sets, each with:
-    soft   the steady beat, on every beat: keeps the tempo (its own volume)
-    pump   the count (3, 2, 1): pump on these; the same hit, harder (count volume)
-    shoot  a double hit: throw now (count volume)
-BeatPlayer plays a rps.game.BeatSchedule on time and reports each beat for the visual count.
+The beat guide's Qt playback: BeatSounds (one preloaded effect per beat kind) and BeatPlayer, which
+plays a rps.game.BeatSchedule on time and reports each beat for the visual count. The samples
+themselves come from rps.sound, which the command line plays without Qt.
 """
 
 import os
 import tempfile
 import time
-import wave
 
-import numpy as np
 from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
 
-RATE = 44100
-STALE_S = 0.1           # a beat the UI reached this late is shown but not played
-SOUNDS = {"drum": "Drum", "wood": "Wood block", "beep": "Beep"}
-CUE_KINDS = ("pump", "shoot")
-
-
-def _decay(n: int, tau: float) -> np.ndarray:
-    return np.exp(-np.arange(n) / RATE / tau)
-
-
-def _tone(freq: float, dur: float, tau: float, drop_to: float = None, drop_tau: float = 0.035) -> np.ndarray:
-    """A decaying sine; with drop_to its pitch falls from freq to drop_to, like a drum skin."""
-    n = int(dur * RATE)
-    f = np.full(n, float(freq))
-    if drop_to is not None:
-        f = drop_to + (freq - drop_to) * np.exp(-np.arange(n) / RATE / drop_tau)
-    return np.sin(2 * np.pi * np.cumsum(f) / RATE) * _decay(n, tau)
-
-
-def _click(ms: float, n_total: int, seed: int = 0) -> np.ndarray:
-    """A sharp tick (differenced noise, i.e. high-passed) at the start: the stick or beater."""
-    n = int(ms / 1000 * RATE)
-    tick = np.diff(np.random.default_rng(seed).uniform(-1, 1, n + 1)) * np.linspace(1, 0, n)
-    out = np.zeros(n_total)
-    out[:n] = tick
-    return out
-
-
-def _norm(x: np.ndarray, peak: float = 1.0) -> np.ndarray:
-    return peak * x / np.max(np.abs(x))
-
-
-def drum(accent: bool) -> np.ndarray:
-    dur = 0.22
-    n = int(dur * RATE)
-    body = np.tanh(5.0 * _tone(170, dur, 0.09, drop_to=65))              # kick; saturation adds overtones
-    knock = _tone(300, dur, 0.06) + 0.5 * _tone(510, dur, 0.035) + 0.25 * _tone(810, dur, 0.02)   # floor-tom thud
-    return _norm(0.5 * body + knock + _click(5, n) * (0.9 if accent else 0.5))
-
-
-def wood(freq: float) -> np.ndarray:
-    dur = 0.12
-    return _norm(_tone(freq, dur, 0.03) + 0.5 * _tone(freq * 2.65, dur, 0.012) + 0.4 * _click(2, int(dur * RATE), 3))
-
-
-def beep(freq: float, dur: float = 0.07) -> np.ndarray:
-    n = int(dur * RATE)
-    i = np.arange(n)
-    ramp = np.minimum(1, i / (0.004 * RATE)) * np.minimum(1, (n - i) / (0.015 * RATE))    # no clicks at the ends
-    return _norm(np.sin(2 * np.pi * freq * i / RATE) * ramp)
-
-
-def _double(hit: np.ndarray, gap_s: float = 0.07, crack: bool = False) -> np.ndarray:
-    x = np.concatenate([hit, np.zeros(int(gap_s * RATE)), hit])
-    if crack:                                                          # a snare-like crack on the first hit
-        m = int(0.12 * RATE)
-        x[:m] += 0.5 * np.random.default_rng(1).uniform(-1, 1, m) * _decay(m, 0.03)
-    return _norm(x, 0.95)
-
-
-def sounds(sound: str = "drum") -> dict:
-    """Peak-normalised samples per beat kind; loudness comes from the volumes."""
-    if sound == "wood":
-        return {"soft": wood(900), "pump": wood(900), "shoot": _double(wood(1300))}
-    if sound == "beep":
-        return {"soft": beep(880), "pump": beep(880), "shoot": _double(beep(1320, 0.06), 0.05)}
-    return {"soft": drum(False), "pump": drum(True), "shoot": _double(drum(True), crack=True)}
-
-
-def write_wav(path: str, samples: np.ndarray):
-    data = (np.clip(samples, -1, 1) * 32767).astype(np.int16)
-    with wave.open(path, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(RATE)
-        w.writeframes(data.tobytes())
+from rps.sound import CUE_KINDS, RATE, SOUNDS, STALE_S, sounds, write_wav
 
 
 class BeatSounds:
